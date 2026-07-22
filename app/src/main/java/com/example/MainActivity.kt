@@ -336,7 +336,7 @@ class MainViewModel(private val repository: DailyEntryRepository, private val co
     val liveTemperature = MutableStateFlow(prefs.getString("LIVE_TEMPERATURE", "৩১°সে.") ?: "৩১°সে.")
     val liveWeatherCode = MutableStateFlow(prefs.getInt("LIVE_WEATHER_CODE", 0))
     val liveForecastTemps = MutableStateFlow(
-        prefs.getString("LIVE_FORECAST_TEMPS", "৩১°,২৯°,২৭°,৩২°,৩০°,২৬°,৩১°")?.split(",") ?: listOf("৩১°", "২৯°", "২৭°", "৩২°", "৩০°", "২৬°", "৩১°")
+        prefs.getString("LIVE_FORECAST_TEMPS", "৩১°/২৫°,২৯°/২৩°,২৭°/২২°,৩২°/২৬°,৩০°/২৪°,২৬°/২০°,৩১°/২৫°")?.split(",") ?: listOf("৩১°/২৫°", "২৯°/২৩°", "২৭°/২২°", "৩২°/২৬°", "৩০°/২৪°", "২৬°/২০°", "৩১°/২৫°")
     )
     val liveForecastCodes = MutableStateFlow(
         prefs.getString("LIVE_FORECAST_CODES", "0,1,2,0,1,3,0")?.split(",")?.map { it.toIntOrNull() ?: 0 } ?: listOf(0, 1, 2, 0, 1, 3, 0)
@@ -354,7 +354,7 @@ class MainViewModel(private val repository: DailyEntryRepository, private val co
         prefs.getString("LIVE_HOURLY_TIMES", "১৬:০০,১৭:০০,১৮:০০,১৮:৪১,১৯:০০,২০:০০")?.split(",") ?: listOf("১৬:০০", "১৭:০০", "১৮:০০", "১৮:৪১", "১৯:০০", "২০:০০")
     )
     val liveHourlyTemps = MutableStateFlow(
-        prefs.getString("LIVE_HOURLY_TEMPS", "২৯°সে.,২৯°সে.,২৮°সে.,সূর্যাস্ত,২৭°সে.,২৭°সে.")?.split(",") ?: listOf("২৯°সে.", "২৯°সে.", "২৮°সে.", "সূর্যাস্ত", "২৭°সে.", "২৭°সে.")
+        prefs.getString("LIVE_HOURLY_TEMPS", "২৯°/২৩°,২৯°/২৩°,২৮°/২২°,সূর্যাস্ত,২৭°/২১°,২৭°/২১°")?.split(",") ?: listOf("২৯°/২৩°", "২৯°/২৩°", "২৮°/২২°", "সূর্যাস্ত", "২৭°/২১°", "২৭°/২১°")
     )
     val liveHourlyCodes = MutableStateFlow(
         prefs.getString("LIVE_HOURLY_CODES", "1,61,2,-1,2,95")?.split(",")?.map { it.toIntOrNull() ?: 0 } ?: listOf(1, 61, 2, -1, 2, 95)
@@ -1103,6 +1103,7 @@ class MainViewModel(private val repository: DailyEntryRepository, private val co
                                         val dayObj = dayItem.optJSONObject("day")
                                         if (dayObj != null) {
                                             val maxTemp = dayObj.optDouble("maxtemp_c", 30.0)
+                                             val minTemp = dayObj.optDouble("mintemp_c", 24.0)
                                             var dayCode = 1000
                                             var dayText = "Clear"
                                             if (dayObj.has("condition")) {
@@ -1110,12 +1111,12 @@ class MainViewModel(private val repository: DailyEntryRepository, private val co
                                                 dayCode = condObj.optInt("code", 1000)
                                                 dayText = condObj.optString("text", "Clear")
                                             }
-                                            newTemps.add("${maxTemp.toInt().toBangla()}°")
+                                            newTemps.add("${maxTemp.toInt().toBangla()}°/${minTemp.toInt().toBangla()}°")
                                             newCodes.add(mapWeatherApiConditionCode(dayCode, dayText))
                                         }
                                     }
 
-                                    val lastTemp = newTemps.lastOrNull() ?: "৩০°"
+                                    val lastTemp = newTemps.lastOrNull() ?: "৩০°/২৫°"
                                     val lastCode = newCodes.lastOrNull() ?: 0
                                     while (newTemps.size < 7) {
                                         newTemps.add(lastTemp)
@@ -1157,6 +1158,12 @@ class MainViewModel(private val repository: DailyEntryRepository, private val co
                                                 val hourOnlyBangla = hourOnly.toBanglaDigits()
 
                                                 val hTempC = hObj.optDouble("temp_c", 30.0)
+                                                val hFeelsC = hObj.optDouble("feelslike_c", hTempC - 3.0)
+                                                val maxT = maxOf(hTempC, hFeelsC).toInt()
+                                                var minT = minOf(hTempC, hFeelsC).toInt()
+                                                if (maxT == minT) {
+                                                    minT = maxT - 3
+                                                }
                                                 var hCode = 1000
                                                 var hText = "Clear"
                                                 if (hObj.has("condition")) {
@@ -1173,7 +1180,7 @@ class MainViewModel(private val repository: DailyEntryRepository, private val co
                                                 }
 
                                                 hTimes.add(hourOnlyBangla)
-                                                hTemps.add("${hTempC.toInt().toBangla()}°সে.")
+                                                hTemps.add("${maxT.toBangla()}°/${minT.toBangla()}°")
                                                 hCodes.add(mapWeatherApiConditionCode(hCode, hText))
                                             }
 
@@ -1758,6 +1765,7 @@ class MainViewModel(private val repository: DailyEntryRepository, private val co
                     )
                 )
             }
+            triggerAutoBackup(immediate = true)
         }
     }
 
@@ -1784,6 +1792,7 @@ class MainViewModel(private val repository: DailyEntryRepository, private val co
                     )
                 )
             }
+            triggerAutoBackup(immediate = true)
         }
     }
 
@@ -1871,6 +1880,7 @@ class MainViewModel(private val repository: DailyEntryRepository, private val co
                     )
                 )
             }
+            triggerAutoBackup(immediate = true)
         }
     }
 
@@ -1889,6 +1899,7 @@ class MainViewModel(private val repository: DailyEntryRepository, private val co
             for (entry in toDelete) {
                 repository.delete(entry)
             }
+            triggerAutoBackup(immediate = true)
         }
     }
 
@@ -2004,6 +2015,7 @@ class MainViewModel(private val repository: DailyEntryRepository, private val co
                     }
                 }
             }
+            triggerAutoBackup(immediate = true)
         }
     }
 
@@ -2071,6 +2083,7 @@ class MainViewModel(private val repository: DailyEntryRepository, private val co
             current.add(cat)
             customCategoriesList.value = current
             prefs.edit().putString("CUSTOM_CATEGORIES", current.joinToString(",")).apply()
+            triggerAutoBackup(immediate = true)
         }
     }
 
@@ -10326,19 +10339,26 @@ fun String.toCleanEnglishWeatherMetric(): String {
 
 @Composable
 fun WeatherMetricItem(value: String, label: String) {
+    val metricShadow = androidx.compose.ui.graphics.Shadow(
+        color = Color.Black.copy(alpha = 0.90f),
+        offset = Offset(1f, 1f),
+        blurRadius = 4f
+    )
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Text(
             text = value,
             fontSize = 13.sp,
             fontWeight = FontWeight.Bold,
-            color = Color.White
+            color = Color.White,
+            style = androidx.compose.ui.text.TextStyle(shadow = metricShadow)
         )
         Spacer(modifier = Modifier.height(1.dp))
         Text(
             text = label,
             fontSize = 10.sp,
-            fontWeight = FontWeight.Normal,
-            color = Color.White.copy(alpha = 0.8f)
+            fontWeight = FontWeight.Medium,
+            color = Color.White.copy(alpha = 0.90f),
+            style = androidx.compose.ui.text.TextStyle(shadow = metricShadow)
         )
     }
 }
@@ -10463,11 +10483,28 @@ fun ImageStyleWeatherDashboard(
                 }
             }
 
+            val headerTopPadding by androidx.compose.animation.core.animateDpAsState(
+                targetValue = if (activeState == HomeUiState.NIGHT || activeState == HomeUiState.STORMY_RAIN) 4.dp else 82.dp,
+                label = "headerTopPadding"
+            )
+
+            val nightTextShadow = androidx.compose.ui.graphics.Shadow(
+                color = Color.Black.copy(alpha = 0.95f),
+                offset = Offset(1.5f, 1.5f),
+                blurRadius = 6f
+            )
+
+            val locationPillBg = if (activeState == HomeUiState.NIGHT || activeState == HomeUiState.STORMY_RAIN) {
+                Color.Black.copy(alpha = 0.42f)
+            } else {
+                Color.White.copy(alpha = 0.12f)
+            }
+
             // Header Row: Clock & Date Left (under left rainbow cloud), Location & Dynamic Temp Right (under right rainbow cloud)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(top = 82.dp, start = 4.dp, end = 4.dp),
+                    .padding(top = headerTopPadding, start = 4.dp, end = 4.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.Top
             ) {
@@ -10480,21 +10517,23 @@ fun ImageStyleWeatherDashboard(
                         Icon(
                             imageVector = Icons.Default.AccessTime,
                             contentDescription = "Clock",
-                            tint = Color.White.copy(alpha = 0.90f),
+                            tint = Color.White.copy(alpha = 0.95f),
                             modifier = Modifier.size(15.dp)
                         )
                         Text(
                             text = liveClockTime,
                             fontSize = 14.5.sp,
                             fontWeight = FontWeight.ExtraBold,
-                            color = Color.White
+                            color = Color.White,
+                            style = androidx.compose.ui.text.TextStyle(shadow = nightTextShadow)
                         )
                     }
                     Text(
                         text = liveDateStr,
                         fontSize = 11.sp,
-                        fontWeight = FontWeight.Medium,
-                        color = Color.White.copy(alpha = 0.90f),
+                        fontWeight = FontWeight.SemiBold,
+                        color = Color.White.copy(alpha = 0.95f),
+                        style = androidx.compose.ui.text.TextStyle(shadow = nightTextShadow),
                         modifier = Modifier.padding(start = 20.dp, top = 2.dp)
                     )
                 }
@@ -10508,7 +10547,7 @@ fun ImageStyleWeatherDashboard(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(4.dp),
                         modifier = Modifier
-                            .background(Color.White.copy(alpha = 0.12f), RoundedCornerShape(12.dp))
+                            .background(locationPillBg, RoundedCornerShape(12.dp))
                             .clickable { onLocationClick() }
                             .padding(horizontal = 8.dp, vertical = 4.dp)
                     ) {
@@ -10525,7 +10564,8 @@ fun ImageStyleWeatherDashboard(
                             color = Color.White,
                             maxLines = 1,
                             overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f, fill = false)
+                            modifier = Modifier.weight(1f, fill = false),
+                            style = androidx.compose.ui.text.TextStyle(shadow = nightTextShadow)
                         )
                         IconButton(
                             onClick = onRefresh,
@@ -10564,7 +10604,8 @@ fun ImageStyleWeatherDashboard(
                                 text = currentTemp.toCleanEnglishWeatherMetric(),
                                 fontSize = 15.sp,
                                 fontWeight = FontWeight.ExtraBold,
-                                color = tempColor
+                                color = tempColor,
+                                style = androidx.compose.ui.text.TextStyle(shadow = nightTextShadow)
                             )
                         }
                     }
@@ -10857,9 +10898,10 @@ fun ImageStyleWeatherDashboard(
                         )
                         Text(
                             text = hTemp,
-                            fontSize = 10.sp,
+                            fontSize = 9.5.sp,
                             fontWeight = FontWeight.Bold,
-                            color = Color.White
+                            color = Color.White,
+                            maxLines = 1
                         )
                     }
                 }
@@ -10908,9 +10950,10 @@ fun ImageStyleWeatherDashboard(
                             )
                             Text(
                                 text = fTemp,
-                                fontSize = 10.sp,
+                                fontSize = 9.5.sp,
                                 fontWeight = FontWeight.Bold,
-                                color = Color.White
+                                color = Color.White,
+                                maxLines = 1
                             )
                         }
                     }
@@ -11630,21 +11673,30 @@ fun DashboardHomeScreen(
         val lengthDp: Float,
         val strokeDp: Float,
         val alpha: Float,
-        val slantPx: Float
+        val slantOffsetDp: Float
     )
 
     val rainDropsList = remember {
         val random = java.util.Random(12345L)
-        List(75) {
+        List(105) {
             RainDropSpec(
                 xRatio = random.nextFloat(),
                 yOffsetRatio = random.nextFloat(),
-                speedMult = 1.0f + random.nextFloat() * 1.8f,
-                lengthDp = 18f + random.nextFloat() * 26f,
-                strokeDp = 0.9f + random.nextFloat() * 1.5f,
-                alpha = 0.18f + random.nextFloat() * 0.45f,
-                slantPx = -5f + random.nextFloat() * 12f
+                speedMult = 1.1f + random.nextFloat() * 1.8f,
+                lengthDp = 14f + random.nextFloat() * 22f,
+                strokeDp = 0.7f + random.nextFloat() * 0.7f,
+                alpha = 0.25f + random.nextFloat() * 0.60f,
+                slantOffsetDp = (random.nextFloat() - 0.5f) * 8f
             )
+        }
+    }
+
+    // Steady wind direction fixed for each rain session
+    val sessionWindSlantDp = remember(activeState) {
+        if (activeState == HomeUiState.STORMY_RAIN) {
+            if (java.util.Random().nextBoolean()) 35f else -35f
+        } else {
+            0f
         }
     }
 
@@ -11654,7 +11706,7 @@ fun DashboardHomeScreen(
         initialValue = 0f,
         targetValue = 1f,
         animationSpec = infiniteRepeatable(
-            animation = tween(1200, easing = LinearEasing),
+            animation = tween(1100, easing = LinearEasing),
             repeatMode = RepeatMode.Restart
         ),
         label = "rainPhase"
@@ -11750,30 +11802,43 @@ fun DashboardHomeScreen(
             Canvas(modifier = Modifier.fillMaxSize()) {
                 val width = size.width
                 val height = size.height
+                val windSlantPx = sessionWindSlantDp.dp.toPx()
 
-                // FALLING RAIN DROPS OVERLAY ("ছবির বৃষ্টির ফোটা গুলো যেনো বৃষ্টির মত ঝরতে থাকে")
+                // FALLING RAIN DROPS OVERLAY (Sleek thin rain streaks slanting steadily per rain session)
                 rainDropsList.forEach { drop ->
                     val progress = (rainPhase * drop.speedMult + drop.yOffsetRatio) % 1.0f
-                    val startY = progress * (height + 100f) - 50f
-                    val startX = (drop.xRatio * width + progress * drop.slantPx) % width
+                    val startY = progress * (height + 120f) - 60f
+                    val totalWind = windSlantPx + drop.slantOffsetDp.dp.toPx()
+
+                    // Wrap x seamlessly across width
+                    val rawX = (drop.xRatio * (width + 300f) - 150f) + progress * totalWind
+                    val startX = ((rawX % width) + width) % width
                     val endY = startY + drop.lengthDp.dp.toPx()
-                    val endX = startX + (drop.slantPx * 0.3f)
+                    val endX = startX + totalWind * (drop.lengthDp / 90f)
 
                     drawLine(
-                        color = Color.White.copy(alpha = drop.alpha * 0.95f),
+                        brush = Brush.verticalGradient(
+                            colors = listOf(
+                                Color.White.copy(alpha = drop.alpha * 0.15f),
+                                Color(0xFFE0F2FE).copy(alpha = drop.alpha * 0.95f)
+                            ),
+                            startY = startY,
+                            endY = endY
+                        ),
                         start = Offset(startX, startY),
                         end = Offset(endX, endY),
                         strokeWidth = drop.strokeDp.dp.toPx(),
                         cap = StrokeCap.Round
                     )
 
-                    if (progress > 0.85f && drop.speedMult > 1.8f) {
-                        val splashR = (progress - 0.85f) * 35.dp.toPx()
+                    // Splash effect when reaching ground
+                    if (progress > 0.88f && drop.speedMult > 1.6f) {
+                        val splashR = (progress - 0.88f) * 28.dp.toPx()
                         drawCircle(
-                            color = Color(0xFF38BDF8).copy(alpha = (1.0f - progress) * 0.8f * drop.alpha),
+                            color = Color(0xFF38BDF8).copy(alpha = (1.0f - progress) * 0.7f * drop.alpha),
                             radius = splashR,
                             center = Offset(endX, endY),
-                            style = Stroke(width = 1.dp.toPx())
+                            style = Stroke(width = 0.8.dp.toPx())
                         )
                     }
                 }
