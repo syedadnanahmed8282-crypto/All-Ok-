@@ -290,6 +290,7 @@ class MainViewModel(private val repository: DailyEntryRepository, private val co
         val serialized = list.joinToString(";;") { "${it.first}||${it.second}||${it.third}" }
         prefs.edit().putString("USER_SAVED_FAVORITE_LOCATIONS", serialized).apply()
         savedFavoriteLocations.value = list
+        triggerAutoBackup(immediate = false)
     }
 
     fun saveCurrentLocationToFavorites(): Boolean {
@@ -306,7 +307,10 @@ class MainViewModel(private val repository: DailyEntryRepository, private val co
         if (!exists) {
             currentList.add(0, Triple(name, lat, lon))
             persistSavedFavoriteLocations(currentList)
+            saveManualLocation(name, lat, lon)
             return true
+        } else {
+            saveManualLocation(name, lat, lon)
         }
         return false
     }
@@ -321,7 +325,10 @@ class MainViewModel(private val repository: DailyEntryRepository, private val co
         if (!exists) {
             currentList.add(0, Triple(cleanName, lat, lon))
             persistSavedFavoriteLocations(currentList)
+            saveManualLocation(cleanName, lat, lon)
             return true
+        } else {
+            saveManualLocation(cleanName, lat, lon)
         }
         return false
     }
@@ -556,6 +563,11 @@ class MainViewModel(private val repository: DailyEntryRepository, private val co
     }
 
     fun fetchIpLocationAndWeather(contextOverride: Context? = null) {
+        if (hasSavedManualLocation()) {
+            val saved = getSavedManualLocation()
+            fetchWeather(saved.second, saved.third, cityFallback = saved.first, contextOverride = contextOverride)
+            return
+        }
         viewModelScope.launch(Dispatchers.IO) {
             var lat = Double.NaN
             var lon = Double.NaN
@@ -650,6 +662,13 @@ class MainViewModel(private val repository: DailyEntryRepository, private val co
     @android.annotation.SuppressLint("MissingPermission")
     fun startLocationTracking(activityContext: Context? = null) {
         val useCtx = activityContext ?: context
+
+        if (hasSavedManualLocation()) {
+            stopLocationTracking(useCtx)
+            val saved = getSavedManualLocation()
+            fetchWeather(saved.second, saved.third, cityFallback = saved.first, contextOverride = useCtx)
+            return
+        }
 
         // Bypassing physical GPS/Network provider registration on emulators prevents AppOps MONITOR_LOCATION or GPS errors
         if (isEmulator()) {
@@ -867,18 +886,23 @@ class MainViewModel(private val repository: DailyEntryRepository, private val co
         }
     }
 
-    fun saveManualLocation(placeName: String, lat: Double, lon: Double) {
+    fun saveManualLocation(placeName: String, lat: Double, lon: Double, contextOverride: Context? = null) {
+        val useCtx = contextOverride ?: context
+        stopLocationTracking(useCtx)
+
         prefs.edit()
             .putString("SAVED_LOCATION_NAME", placeName)
             .putString("saved_location_name", placeName)
             .putString("SAVED_LAT", lat.toString())
             .putString("SAVED_LON", lon.toString())
+            .putString("LIVE_LOCATION_NAME", placeName)
             .apply()
 
         liveLocationName.value = placeName
         liveLatitude.value = lat
         liveLongitude.value = lon
-        fetchWeather(lat, lon, cityFallback = placeName)
+        fetchWeather(lat, lon, cityFallback = placeName, contextOverride = useCtx)
+        triggerAutoBackup(immediate = false)
     }
 
     fun clearSavedManualLocationAndUseGps(contextOverride: Context? = null) {
@@ -947,7 +971,80 @@ class MainViewModel(private val repository: DailyEntryRepository, private val co
 
             if (!lat.isNaN() && !lon.isNaN()) {
                 withContext(Dispatchers.Main) {
-                    saveManualLocation(resolvedName, lat, lon)
+                    saveManualLocation(resolvedName, lat, lon, contextOverride)
+                    onComplete(true, resolvedName)
+                }
+                return@launch
+            }
+
+            // Fallback 1: WeatherAPI Search API (works globally without location service)
+            try {
+                val encodedQ = java.net.URLEncoder.encode(cleanQuery, "UTF-8")
+                val searchUrl = "https://api.weatherapi.com/v1/search.json?key=b83afa5ae51f461c8a7162850262207&q=$encodedQ"
+                val client = OkHttpClient.Builder()
+                    .connectTimeout(6, java.util.concurrent.TimeUnit.SECONDS)
+                    .readTimeout(6, java.util.concurrent.TimeUnit.SECONDS)
+                    .build()
+                val req = Request.Builder().url(searchUrl).build()
+                client.newCall(req).execute().use { resp ->
+                    if (resp.isSuccessful) {
+                        val body = resp.body?.string()
+                        if (!body.isNullOrBlank()) {
+                            val jsonArr = JSONArray(body)
+                            if (jsonArr.length() > 0) {
+                                val obj = jsonArr.getJSONObject(0)
+                                lat = obj.optDouble("lat", Double.NaN)
+                                lon = obj.optDouble("lon", Double.NaN)
+                                val wName = obj.optString("name", cleanQuery)
+                                val wRegion = obj.optString("region", "")
+                                val wCountry = obj.optString("country", "")
+                                resolvedName = when {
+                                    wRegion.isNotBlank() && !wName.contains(wRegion, ignoreCase = true) -> "$wName, $wRegion"
+                                    wCountry.isNotBlank() && !wName.contains(wCountry, ignoreCase = true) -> "$wName, $wCountry"
+                                    else -> wName
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("WEATHER_APP_ERROR", "Error on WeatherAPI search endpoint", e)
+            }
+
+            // Fallback 2: Direct WeatherAPI forecast call with query string
+            if (lat.isNaN() || lon.isNaN()) {
+                try {
+                    val encodedQ = java.net.URLEncoder.encode(cleanQuery, "UTF-8")
+                    val forecastUrl = "https://api.weatherapi.com/v1/forecast.json?key=b83afa5ae51f461c8a7162850262207&q=$encodedQ&days=1&aqi=no&alerts=no"
+                    val client = OkHttpClient.Builder()
+                        .connectTimeout(6, java.util.concurrent.TimeUnit.SECONDS)
+                        .readTimeout(6, java.util.concurrent.TimeUnit.SECONDS)
+                        .build()
+                    val req = Request.Builder().url(forecastUrl).build()
+                    client.newCall(req).execute().use { resp ->
+                        if (resp.isSuccessful) {
+                            val body = resp.body?.string()
+                            if (!body.isNullOrBlank()) {
+                                val json = JSONObject(body)
+                                if (json.has("location")) {
+                                    val locObj = json.getJSONObject("location")
+                                    lat = locObj.optDouble("lat", Double.NaN)
+                                    lon = locObj.optDouble("lon", Double.NaN)
+                                    val wName = locObj.optString("name", cleanQuery)
+                                    val wRegion = locObj.optString("region", "")
+                                    resolvedName = if (wRegion.isNotBlank() && !wName.contains(wRegion, ignoreCase = true)) "$wName, $wRegion" else wName
+                                }
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.e("WEATHER_APP_ERROR", "Error on WeatherAPI forecast direct query", e)
+                }
+            }
+
+            if (!lat.isNaN() && !lon.isNaN()) {
+                withContext(Dispatchers.Main) {
+                    saveManualLocation(resolvedName, lat, lon, contextOverride)
                     onComplete(true, resolvedName)
                 }
             } else {
@@ -1543,7 +1640,8 @@ class MainViewModel(private val repository: DailyEntryRepository, private val co
                         val body = response.body?.string()
                         if (body != null && body != "null" && body.isNotBlank()) {
                             withContext(Dispatchers.Main) {
-                                importBackup(body, overwrite = true)
+                                importBackup(body, overwrite = false)
+                                triggerCloudSync(immediate = true)
                             }
                         }
                     }
@@ -2150,9 +2248,9 @@ class MainViewModel(private val repository: DailyEntryRepository, private val co
         }
     }
 
-    fun exportBackup(): String {
+    suspend fun exportBackup(): String {
         return try {
-            val entries = rawAllEntries.value
+            val entries = repository.allEntries.first()
             val jsonArray = JSONArray()
             for (e in entries) {
                 val obj = JSONObject()
@@ -2176,6 +2274,11 @@ class MainViewModel(private val repository: DailyEntryRepository, private val co
             root.put("monthlyIncomeTarget", monthlyIncomeTarget.value)
             root.put("folders", mainFolders.value.joinToString(","))
             root.put("categories", customCategoriesList.value.joinToString(","))
+            root.put("savedFavoriteLocations", prefs.getString("USER_SAVED_FAVORITE_LOCATIONS", ""))
+            root.put("savedLocationName", prefs.getString("SAVED_LOCATION_NAME", ""))
+            root.put("savedLat", prefs.getString("SAVED_LAT", ""))
+            root.put("savedLon", prefs.getString("SAVED_LON", ""))
+            root.put("liveLocationName", prefs.getString("LIVE_LOCATION_NAME", ""))
             
             // Return base64 or raw string
             root.toString()
@@ -2185,9 +2288,9 @@ class MainViewModel(private val repository: DailyEntryRepository, private val co
         }
     }
 
-    fun exportBackupCsv(): String {
+    suspend fun exportBackupCsv(): String {
         return try {
-            val entries = rawAllEntries.value
+            val entries = repository.allEntries.first()
             val sb = java.lang.StringBuilder()
             // CSV Header
             sb.append("আইডি,তারিখ (Timestamp),তারিখ (পঠনযোগ্য),খাতা,ধরণ,ক্যাটাগরি,পরিমাণ (পিস),আয় (টাকা),ব্যয় (টাকা),মন্তব্য\n")
@@ -2264,6 +2367,39 @@ class MainViewModel(private val repository: DailyEntryRepository, private val co
                 val list = root.getString("categories").split(",").toMutableList()
                 customCategoriesList.value = list
                 prefs.edit().putString("CUSTOM_CATEGORIES", list.joinToString(",")).apply()
+            }
+
+            if (root.has("savedFavoriteLocations")) {
+                val favs = root.optString("savedFavoriteLocations", "")
+                if (favs.isNotBlank()) {
+                    prefs.edit().putString("USER_SAVED_FAVORITE_LOCATIONS", favs).apply()
+                    savedFavoriteLocations.value = loadSavedFavoriteLocationsFromPrefs()
+                }
+            }
+
+            if (root.has("savedLocationName") && root.has("savedLat") && root.has("savedLon")) {
+                val sName = root.optString("savedLocationName", "")
+                val sLat = root.optString("savedLat", "")
+                val sLon = root.optString("savedLon", "")
+                if (sName.isNotBlank() && sLat.isNotBlank() && sLon.isNotBlank()) {
+                    prefs.edit()
+                        .putString("SAVED_LOCATION_NAME", sName)
+                        .putString("saved_location_name", sName)
+                        .putString("SAVED_LAT", sLat)
+                        .putString("SAVED_LON", sLon)
+                        .apply()
+                    liveLocationName.value = sName
+                    sLat.toDoubleOrNull()?.let { liveLatitude.value = it }
+                    sLon.toDoubleOrNull()?.let { liveLongitude.value = it }
+                }
+            }
+
+            if (root.has("liveLocationName")) {
+                val lName = root.optString("liveLocationName", "")
+                if (lName.isNotBlank()) {
+                    liveLocationName.value = lName
+                    prefs.edit().putString("LIVE_LOCATION_NAME", lName).apply()
+                }
             }
 
             val entriesArray = root.getJSONArray("entries")
@@ -2474,6 +2610,7 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
     var showBudgetDialog by remember { mutableStateOf(false) }
     var showIncomeTargetDialog by remember { mutableStateOf(false) }
     var showMonthlyHistoryDialog by remember { mutableStateOf(false) }
+    var showFolderAllHistoryDialog by remember { mutableStateOf(false) }
 
     // Calculator states
     var isCalculatorVisible by remember { mutableStateOf(false) }
@@ -4327,29 +4464,53 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
                                 Text("(${premiumDailyGrouped.size.toBangla()} দিন)", fontSize = 11.sp, color = Color(0xFF94A3B8), fontWeight = FontWeight.Bold)
                             }
                             
-                            Surface(
-                                shape = RoundedCornerShape(8.dp),
-                                color = Color(0xFF818CF8).copy(alpha = 0.12f),
-                                border = BorderStroke(1.dp, Color(0xFF818CF8).copy(alpha = 0.3f)),
-                                modifier = Modifier.clickable { sortNewestFirstPremium = !sortNewestFirstPremium }
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
-                                Row(
-                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = Color(0xFF818CF8).copy(alpha = 0.12f),
+                                    border = BorderStroke(1.dp, Color(0xFF818CF8).copy(alpha = 0.3f)),
+                                    modifier = Modifier.clickable { sortNewestFirstPremium = !sortNewestFirstPremium }
                                 ) {
-                                    Icon(
-                                        imageVector = if (sortNewestFirstPremium) Icons.Default.ArrowDownward else Icons.Default.ArrowUpward,
-                                        contentDescription = "সাজানো",
-                                        tint = Color(0xFF818CF8),
-                                        modifier = Modifier.size(12.dp)
-                                    )
-                                    Text(
-                                        text = if (sortNewestFirstPremium) "নতুন উপরে" else "পুরাতন উপরে",
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = Color(0xFF818CF8)
-                                    )
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = if (sortNewestFirstPremium) Icons.Default.ArrowDownward else Icons.Default.ArrowUpward,
+                                            contentDescription = "সাজানো",
+                                            tint = Color(0xFF818CF8),
+                                            modifier = Modifier.size(12.dp)
+                                        )
+                                        Text(
+                                            text = if (sortNewestFirstPremium) "নতুন উপরে" else "পুরাতন উপরে",
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color(0xFF818CF8)
+                                        )
+                                    }
+                                }
+
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = Color(0xFF818CF8).copy(alpha = 0.12f),
+                                    border = BorderStroke(1.dp, Color(0xFF818CF8).copy(alpha = 0.3f)),
+                                    modifier = Modifier.clickable { showFolderAllHistoryDialog = true }
+                                ) {
+                                    Box(
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Menu,
+                                            contentDescription = "সকল ইতিহাস",
+                                            tint = Color(0xFF818CF8),
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -5880,6 +6041,25 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
                                     modifier = Modifier.size(20.dp)
                                 )
                             }
+
+                            Spacer(modifier = Modifier.width(6.dp))
+
+                            IconButton(
+                                onClick = { showFolderAllHistoryDialog = true },
+                                modifier = Modifier
+                                    .background(
+                                        Color(0xFF1E3A8A).copy(alpha = 0.4f),
+                                        CircleShape
+                                    )
+                                    .size(46.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Menu,
+                                    contentDescription = "সকল ইতিহাস",
+                                    tint = Color(0xFF60A5FA),
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
                         }
                     }
                 }
@@ -5962,6 +6142,25 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
             }
 
     // --- DIALOGS CONTROLLERS ---
+
+    if (showFolderAllHistoryDialog) {
+        FolderAllHistoryDialog(
+            folderName = selectedFolder,
+            entries = entries,
+            currentKhataMode = currentKhataMode,
+            wageRate = wageRate,
+            onDismiss = { showFolderAllHistoryDialog = false },
+            onEditEntry = { item ->
+                entryToEdit = item
+                showAddDialog = true
+                showFolderAllHistoryDialog = false
+            },
+            onDeleteEntry = { item ->
+                viewModel.deleteEntry(item)
+                Toast.makeText(context, "হিসাব ডিলিট করা হয়েছে", Toast.LENGTH_SHORT).show()
+            }
+        )
+    }
 
     // 1. ADD / EDIT RECORD DIALOG
     if (showAddDialog) {
@@ -8715,6 +8914,344 @@ fun HistoryListItemRow(
     }
 }
 
+// --- FOLDER ALL HISTORY DIALOG (VIEW ALL HISTORY OF SELECTED FOLDER) ---
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun FolderAllHistoryDialog(
+    folderName: String,
+    entries: List<DailyEntry>,
+    currentKhataMode: String,
+    wageRate: Double,
+    onDismiss: () -> Unit,
+    onEditEntry: (DailyEntry) -> Unit,
+    onDeleteEntry: (DailyEntry) -> Unit
+) {
+    var searchQuery by remember { mutableStateOf("") }
+
+    val folderEntries = remember(entries, folderName, searchQuery, currentKhataMode) {
+        entries.filter { entry ->
+            val matchFolder = (folderName == "সব ফোল্ডার" || entry.folderName == folderName)
+            val matchSearch = searchQuery.isBlank() ||
+                    entry.note.contains(searchQuery, ignoreCase = true) ||
+                    entry.category.contains(searchQuery, ignoreCase = true) ||
+                    entry.quantity.toString().contains(searchQuery) ||
+                    entry.expense.toString().contains(searchQuery) ||
+                    entry.income.toString().contains(searchQuery)
+            matchFolder && matchSearch
+        }.sortedByDescending { it.dateMillis }
+    }
+
+    val totalQty = remember(folderEntries) { folderEntries.sumOf { it.quantity } }
+    val totalIncome = remember(folderEntries) { folderEntries.sumOf { if (it.isIncome) it.income else 0.0 } }
+    val totalExpense = remember(folderEntries) { folderEntries.sumOf { if (!it.isIncome) it.expense else 0.0 } }
+    val totalEarned = remember(totalQty, wageRate, totalIncome, totalExpense) {
+        (totalQty * wageRate) + totalIncome - totalExpense
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = Color(0xFF0F172A),
+        shape = RoundedCornerShape(20.dp),
+        title = {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(36.dp)
+                            .background(Color(0xFF3B82F6).copy(alpha = 0.2f), RoundedCornerShape(10.dp)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.MenuBook,
+                            contentDescription = null,
+                            tint = Color(0xFF60A5FA),
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                    Column {
+                        Text(
+                            text = if (folderName == "সব ফোল্ডার") "সকল ফোল্ডারের ইতিহাস" else "ফোল্ডার: $folderName",
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = "মোট রেকর্ড: ${folderEntries.size.toBangla()} টি",
+                            fontSize = 11.sp,
+                            color = Color(0xFF94A3B8)
+                        )
+                    }
+                }
+
+                IconButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.size(28.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = "বন্ধ করুন",
+                        tint = Color(0xFF94A3B8),
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                // Summary Card based on currentKhataMode
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(1.dp, Color(0xFF3B82F6).copy(alpha = 0.25f))
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(10.dp),
+                        horizontalArrangement = Arrangement.SpaceAround,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        if (currentKhataMode == "PREMIUM") {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text("মোট আয়", fontSize = 10.sp, color = Color(0xFF94A3B8))
+                                Text("৳ ${totalIncome.toInt().toBangla()}", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color(0xFF34D399))
+                            }
+                            Text("|", color = Color(0xFF334155), fontSize = 12.sp)
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text("মোট ব্যয়", fontSize = 10.sp, color = Color(0xFF94A3B8))
+                                Text("৳ ${totalExpense.toInt().toBangla()}", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color(0xFFF87171))
+                            }
+                            Text("|", color = Color(0xFF334155), fontSize = 12.sp)
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text("অবশিষ্ট", fontSize = 10.sp, color = Color(0xFF94A3B8))
+                                Text("৳ ${(totalIncome - totalExpense).toInt().toBangla()}", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color(0xFF22D3EE))
+                            }
+                        } else if (currentKhataMode == "ALT") {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text("মোট ব্যয়", fontSize = 10.sp, color = Color(0xFF94A3B8))
+                                Text("৳ ${totalExpense.toInt().toBangla()}", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color(0xFFF87171))
+                            }
+                            Text("|", color = Color(0xFF334155), fontSize = 12.sp)
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text("মোট এন্ট্রি", fontSize = 10.sp, color = Color(0xFF94A3B8))
+                                Text("${folderEntries.size.toBangla()} টি", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color(0xFF60A5FA))
+                            }
+                        } else {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text("মোট পরিমাণ", fontSize = 10.sp, color = Color(0xFF94A3B8))
+                                Text("${totalQty.toBangla()} পিস", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color(0xFF60A5FA))
+                            }
+                            Text("|", color = Color(0xFF334155), fontSize = 12.sp)
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text("মোট অর্জিত", fontSize = 10.sp, color = Color(0xFF94A3B8))
+                                Text("৳ ${totalEarned.toInt().toBangla()}", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color(0xFF34D399))
+                            }
+                            if (totalExpense > 0) {
+                                Text("|", color = Color(0xFF334155), fontSize = 12.sp)
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Text("ব্যয়", fontSize = 10.sp, color = Color(0xFF94A3B8))
+                                    Text("৳ ${totalExpense.toInt().toBangla()}", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color(0xFFF87171))
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Search field
+                OutlinedTextField(
+                    value = searchQuery,
+                    onValueChange = { searchQuery = it },
+                    placeholder = { Text("ইতিহাস খুঁজুন...", fontSize = 12.sp, color = Color(0xFF94A3B8)) },
+                    leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, tint = Color(0xFF94A3B8), modifier = Modifier.size(16.dp)) },
+                    trailingIcon = {
+                        if (searchQuery.isNotEmpty()) {
+                            IconButton(onClick = { searchQuery = "" }) {
+                                Icon(Icons.Default.Clear, contentDescription = null, tint = Color(0xFF94A3B8), modifier = Modifier.size(14.dp))
+                            }
+                        }
+                    },
+                    singleLine = true,
+                    shape = RoundedCornerShape(20.dp),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = Color(0xFF3B82F6).copy(alpha = 0.5f),
+                        unfocusedBorderColor = Color.White.copy(alpha = 0.1f),
+                        focusedContainerColor = Color(0xFF1E293B).copy(alpha = 0.5f),
+                        unfocusedContainerColor = Color(0xFF1E293B).copy(alpha = 0.3f),
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(44.dp),
+                    textStyle = TextStyle(fontSize = 12.sp)
+                )
+
+                // Scrollable List of History Entries
+                if (folderEntries.isEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(180.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "কোনো হিসাবের তথ্য পাওয়া যায়নি",
+                            color = Color(0xFF94A3B8).copy(alpha = 0.6f),
+                            fontSize = 12.5.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 340.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        items(folderEntries, key = { it.id }) { item ->
+                            val dateStr = remember(item.dateMillis) {
+                                val sdf = java.text.SimpleDateFormat("dd MMMM, yyyy", java.util.Locale("bn", "BD"))
+                                sdf.format(java.util.Date(item.dateMillis)).toBanglaDigits()
+                            }
+
+                            Card(
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
+                                shape = RoundedCornerShape(10.dp),
+                                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.05f))
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(10.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                        ) {
+                                            Text(
+                                                text = dateStr,
+                                                fontSize = 11.5.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = Color(0xFF60A5FA)
+                                            )
+                                            if (item.category.isNotBlank() && item.category != "অন্যান্য") {
+                                                Surface(
+                                                    shape = RoundedCornerShape(4.dp),
+                                                    color = Color(0xFF3B82F6).copy(alpha = 0.15f)
+                                                ) {
+                                                    Text(
+                                                        text = item.category,
+                                                        fontSize = 9.5.sp,
+                                                        color = Color(0xFF93C5FD),
+                                                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                                    )
+                                                }
+                                            }
+                                        }
+
+                                        if (item.note.isNotBlank()) {
+                                            Text(
+                                                text = item.note,
+                                                fontSize = 11.sp,
+                                                color = Color(0xFFCBD5E1),
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+
+                                        Row(
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            modifier = Modifier.padding(top = 2.dp)
+                                        ) {
+                                            if (item.quantity > 0) {
+                                                Text(
+                                                    text = "${item.quantity.toBangla()} পিস",
+                                                    fontSize = 11.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = Color(0xFF34D399)
+                                                )
+                                            }
+                                            if (item.isIncome && item.income > 0) {
+                                                Text(
+                                                    text = "আয়: ৳ ${item.income.toInt().toBangla()}",
+                                                    fontSize = 11.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = Color(0xFF34D399)
+                                                )
+                                            }
+                                            if (item.expense > 0) {
+                                                Text(
+                                                    text = "ব্যয়: ৳ ${item.expense.toInt().toBangla()}",
+                                                    fontSize = 11.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = Color(0xFFF87171)
+                                                )
+                                            }
+                                        }
+                                    }
+
+                                    Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                                        IconButton(
+                                            onClick = { onEditEntry(item) },
+                                            modifier = Modifier.size(28.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Edit,
+                                                contentDescription = "সম্পাদনা",
+                                                tint = Color(0xFF818CF8),
+                                                modifier = Modifier.size(14.dp)
+                                            )
+                                        }
+                                        IconButton(
+                                            onClick = { onDeleteEntry(item) },
+                                            modifier = Modifier.size(28.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Delete,
+                                                contentDescription = "মুছে ফেলুন",
+                                                tint = Color(0xFFEF4444),
+                                                modifier = Modifier.size(14.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = onDismiss,
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF3B82F6)),
+                shape = RoundedCornerShape(10.dp)
+            ) {
+                Text("বন্ধ করুন", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+            }
+        }
+    )
+}
+
 // --- DYNAMIC INPUT DIALOG FLOW (WITH LIVE TARGET TRACKING!) ---
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -9267,21 +9804,139 @@ fun formatCalcResult(value: Double): String {
     }
 }
 
-// --- 3D FLOATING ROYAL BLUE CALCULATOR DIALOG ---
+// Helper to parse voice math into calculator expressions
+fun parseVoiceToCalc(spoken: String): String {
+    var s = spoken.lowercase(java.util.Locale.ROOT)
+    s = s.replace("plus", "+").replace("যোগ", "+")
+         .replace("minus", "-").replace("বিয়োগ", "-")
+         .replace("times", "*").replace("multiply", "*").replace("x", "*").replace("গুণ", "*")
+         .replace("divided by", "/").replace("divide", "/").replace("ভাগ", "/")
+         .replace("পাঁচশ", "500").replace("পাঁচশো", "500")
+         .replace("একশ", "100").replace("একশো", "100")
+         .replace("হাজার", "1000")
+    val sb = StringBuilder()
+    for (ch in s) {
+        if (ch in '0'..'9' || ch in listOf('+', '-', '*', '/', '.', '(', ')')) {
+            sb.append(ch)
+        }
+    }
+    return sb.toString()
+}
+
+// Data class for 24-hour Calculator History
+data class CalcHistoryItem(
+    val expression: String,
+    val result: String,
+    val timestamp: Long = System.currentTimeMillis()
+)
+
+fun saveCalcHistory(context: Context, items: List<CalcHistoryItem>) {
+    val prefs = context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
+    val now = System.currentTimeMillis()
+    val twentyFourHoursAgo = now - (24 * 60 * 60 * 1000L)
+    
+    // Auto-delete entries older than 24h
+    val validItems = items.filter { it.timestamp >= twentyFourHoursAgo }
+    val jsonArr = org.json.JSONArray()
+    validItems.forEach { item ->
+        val obj = org.json.JSONObject()
+        obj.put("expr", item.expression)
+        obj.put("res", item.result)
+        obj.put("time", item.timestamp)
+        jsonArr.put(obj)
+    }
+    prefs.edit().putString("CALCULATOR_24H_HISTORY", jsonArr.toString()).apply()
+}
+
+fun loadCalcHistory(context: Context): List<CalcHistoryItem> {
+    val prefs = context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
+    val jsonStr = prefs.getString("CALCULATOR_24H_HISTORY", null) ?: return emptyList()
+    val list = mutableListOf<CalcHistoryItem>()
+    val now = System.currentTimeMillis()
+    val twentyFourHoursAgo = now - (24 * 60 * 60 * 1000L)
+    var needsPurge = false
+
+    try {
+        val jsonArr = org.json.JSONArray(jsonStr)
+        for (i in 0 until jsonArr.length()) {
+            val obj = jsonArr.getJSONObject(i)
+            val time = obj.optLong("time", now)
+            if (time >= twentyFourHoursAgo) {
+                list.add(
+                    CalcHistoryItem(
+                        expression = obj.optString("expr", ""),
+                        result = obj.optString("res", "0"),
+                        timestamp = time
+                    )
+                )
+            } else {
+                needsPurge = true
+            }
+        }
+    } catch (e: Exception) {
+        e.printStackTrace()
+    }
+
+    if (needsPurge) {
+        saveCalcHistory(context, list)
+    }
+
+    return list
+}
+
+fun formatTimeAgoBn(timestamp: Long): String {
+    val diffMs = System.currentTimeMillis() - timestamp
+    val diffMins = diffMs / (1000 * 60)
+    val diffHours = diffMins / 60
+    return when {
+        diffMins < 1 -> "এইমাত্র"
+        diffMins < 60 -> "${diffMins.toString().toBanglaDigits()} মি. আগে"
+        else -> "${diffHours.toString().toBanglaDigits()} ঘণ্টা আগে"
+    }
+}
+
+// --- EXACT MOCKUP MATCHING CALCULATOR DIALOG ---
 @Composable
 fun Royal3DCalculatorDialog(
     onDismiss: () -> Unit,
     onTransferToEntry: (value: String, type: String) -> Unit
 ) {
+    val context = LocalContext.current
+    val prefs = remember { context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE) }
+    var isCalcDarkMode by remember { mutableStateOf(prefs.getBoolean("CALC_IS_DARK_MODE", true)) }
     var expression by remember { mutableStateOf("") }
     var resultText by remember { mutableStateOf("0") }
+    var historyItems by remember { mutableStateOf(loadCalcHistory(context)) }
+    var showScreenHistory by remember { mutableStateOf(true) }
+    var showHistoryDialog by remember { mutableStateOf(false) }
     var showTransferPopup by remember { mutableStateOf(false) }
+
+    // Refresh history list on launch to automatically prune >24h entries
+    LaunchedEffect(Unit) {
+        historyItems = loadCalcHistory(context)
+    }
+
+    // Speech Recognizer launcher for mic icon
+    val speechLauncher = rememberLauncherForActivityResult(
+        contract = androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()
+    ) { res ->
+        if (res.resultCode == android.app.Activity.RESULT_OK && res.data != null) {
+            val matches = res.data?.getStringArrayListExtra(android.speech.RecognizerIntent.EXTRA_RESULTS)
+            val spoken = matches?.firstOrNull()
+            if (!spoken.isNullOrBlank()) {
+                val parsed = parseVoiceToCalc(spoken)
+                if (parsed.isNotBlank()) {
+                    expression += parsed
+                }
+                Toast.makeText(context, "ভয়েস: $spoken", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
 
     LaunchedEffect(expression) {
         if (expression.isNotBlank()) {
             try {
                 var evalExpr = expression.trim()
-                // Trim trailing operators to allow live calculation as user types
                 while (evalExpr.isNotEmpty() && (evalExpr.endsWith("+") || evalExpr.endsWith("-") || evalExpr.endsWith("*") || evalExpr.endsWith("/"))) {
                     evalExpr = evalExpr.substring(0, evalExpr.length - 1).trim()
                 }
@@ -9292,224 +9947,376 @@ fun Royal3DCalculatorDialog(
                     resultText = "0"
                 }
             } catch (e: Exception) {
-                // Keep last result or do nothing
+                // Keep last valid result
             }
         } else {
             resultText = "0"
         }
     }
 
-    Dialog(onDismissRequest = onDismiss) {
+    // Color definitions based on Dark/Light mode matching the mockup
+    val cardBg = if (isCalcDarkMode) Color(0xFF34424D) else Color(0xFFF3F5F8)
+    val keypadBg = if (isCalcDarkMode) Color(0xFF2B363F) else Color(0xFFE2E7EE)
+    val historyTextColor = if (isCalcDarkMode) Color(0xFF94A3B8) else Color(0xFF64748B)
+    val mainDisplayTextColor = if (isCalcDarkMode) Color.White else Color(0xFF0F172A)
+    
+    val utilityBtnBg = if (isCalcDarkMode) Color(0xFF4D5A66) else Color(0xFFFFFFFF)
+    val utilityBtnTextColor = if (isCalcDarkMode) Color.White else Color(0xFF1E293B)
+    
+    val operatorBtnBg = Color(0xFFEA580C) // Vibrant Orange matching mockup
+    val operatorBtnTextColor = Color.White
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)
+    ) {
         Card(
-            shape = RoundedCornerShape(24.dp),
-            colors = CardDefaults.cardColors(containerColor = Color(0xFF0F1E36)), // Royal dark background
-            border = BorderStroke(2.dp, Color(0xFF2563EB)), // Glowing royal blue border
+            shape = RoundedCornerShape(32.dp),
+            colors = CardDefaults.cardColors(containerColor = cardBg),
+            elevation = CardDefaults.cardElevation(defaultElevation = 12.dp),
             modifier = Modifier
-                .fillMaxWidth()
-                .padding(12.dp)
+                .fillMaxWidth(0.92f)
+                .padding(vertical = 16.dp)
         ) {
             Column(
                 modifier = Modifier
-                    .padding(16.dp)
-                    .fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(14.dp)
+                    .fillMaxWidth()
+                    .padding(top = 16.dp, start = 16.dp, end = 16.dp, bottom = 12.dp)
             ) {
-                // Top Header Row
+                // --- TOP BAR: MIC | THEME SWITCH TOGGLE | HISTORY & CLOSE ---
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 12.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    // Microphone button
+                    Surface(
+                        onClick = {
+                            val intent = android.content.Intent(android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                                putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL, android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                                putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE, "bn-BD")
+                                putExtra(android.speech.RecognizerIntent.EXTRA_PROMPT, "কথা বলুন (যেমন: 500 + 500)")
+                            }
+                            try {
+                                speechLauncher.launch(intent)
+                            } catch (e: Exception) {
+                                Toast.makeText(context, "ভয়েস ইনপুট সমর্থিত নয়", Toast.LENGTH_SHORT).show()
+                            }
+                        },
+                        shape = CircleShape,
+                        color = if (isCalcDarkMode) Color(0xFF43525D) else Color(0xFFE2E7EC),
+                        modifier = Modifier.size(38.dp)
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.Calculate,
-                            contentDescription = null,
-                            tint = Color(0xFFFBBF24), // Amber/Yellow
-                            modifier = Modifier.size(22.dp)
-                        )
-                        Text(
-                            text = "স্মার্ট ক্যালকুলেটর",
-                            color = Color.White,
-                            fontSize = 15.sp,
-                            fontWeight = FontWeight.Bold
-                        )
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = Icons.Default.Mic,
+                                contentDescription = "Voice Input",
+                                tint = if (isCalcDarkMode) Color.White else Color(0xFF475569),
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
                     }
-                    IconButton(
-                        onClick = onDismiss,
-                        modifier = Modifier.size(28.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Close,
-                            contentDescription = "বন্ধ করুন",
-                            tint = Color(0xFF94A3B8),
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
-                }
 
-                // Calc Display Screen
-                Surface(
-                    color = Color(0xFF070F1E),
-                    shape = RoundedCornerShape(14.dp),
-                    border = BorderStroke(1.dp, Color(0xFF1E3A8A)),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(90.dp)
-                ) {
-                    Column(
+                    // Theme Toggle Capsule Switch (Sun / Moon) - Saved permanently
+                    Surface(
+                        onClick = {
+                            val newMode = !isCalcDarkMode
+                            isCalcDarkMode = newMode
+                            prefs.edit().putBoolean("CALC_IS_DARK_MODE", newMode).apply()
+                        },
+                        shape = RoundedCornerShape(20.dp),
+                        color = if (isCalcDarkMode) Color(0xFF273138) else Color(0xFFCBD5E1),
                         modifier = Modifier
-                            .fillMaxSize()
-                            .padding(12.dp),
-                        verticalArrangement = Arrangement.SpaceBetween,
-                        horizontalAlignment = Alignment.End
+                            .width(68.dp)
+                            .height(34.dp)
                     ) {
-                        // Expression Text (Bangla display)
-                        Text(
-                            text = expression.ifEmpty { " " }
-                                .replace("*", "×")
-                                .replace("/", "÷")
-                                .toBanglaDigits(),
-                            color = Color(0xFF94A3B8),
-                            fontSize = 14.sp,
-                            textAlign = TextAlign.End,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.fillMaxWidth()
-                        )
-
-                        // Result Text (Bangla display, holds long-press detector)
-                        Column(
-                            horizontalAlignment = Alignment.End,
-                            modifier = Modifier.fillMaxWidth()
+                        Row(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(3.dp),
+                            horizontalArrangement = if (isCalcDarkMode) Arrangement.End else Arrangement.Start,
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text(
-                                text = resultText.toBanglaDigits(),
-                                color = Color(0xFFFBBF24), // Dark Yellow text
-                                fontSize = 24.sp,
-                                fontWeight = FontWeight.Black,
-                                textAlign = TextAlign.End,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .pointerInput(resultText) {
-                                        detectTapGestures(
-                                            onLongPress = {
-                                                if (resultText != "0" && resultText.isNotBlank()) {
-                                                    showTransferPopup = true
-                                                }
-                                            }
+                            Surface(
+                                shape = CircleShape,
+                                color = if (isCalcDarkMode) Color(0xFF4D5A66) else Color.White,
+                                modifier = Modifier.size(28.dp)
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    if (isCalcDarkMode) {
+                                        Icon(
+                                            imageVector = Icons.Default.NightsStay,
+                                            contentDescription = "Dark Mode",
+                                            tint = Color(0xFFFBBF24),
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    } else {
+                                        Icon(
+                                            imageVector = Icons.Default.WbSunny,
+                                            contentDescription = "Light Mode",
+                                            tint = Color(0xFFF59E0B),
+                                            modifier = Modifier.size(16.dp)
                                         )
                                     }
+                                }
+                            }
+                        }
+                    }
+
+                    // Right action buttons: History Icon & Close Icon
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        IconButton(
+                            onClick = {
+                                historyItems = loadCalcHistory(context)
+                                showHistoryDialog = true
+                            },
+                            modifier = Modifier.size(34.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.History,
+                                contentDescription = "History",
+                                tint = if (historyItems.isNotEmpty()) Color(0xFFEA580C) else historyTextColor,
+                                modifier = Modifier.size(22.dp)
                             )
-                            Text(
-                                text = "এন্ট্রিতে যোগ করতে ফলাফলের উপর চেপে ধরে রাখুন",
-                                color = Color(0xFF3B82F6).copy(alpha = 0.8f),
-                                fontSize = 8.sp,
-                                fontWeight = FontWeight.Medium,
-                                textAlign = TextAlign.End,
-                                modifier = Modifier.fillMaxWidth()
+                        }
+
+                        IconButton(
+                            onClick = onDismiss,
+                            modifier = Modifier.size(34.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Close",
+                                tint = historyTextColor,
+                                modifier = Modifier.size(20.dp)
                             )
                         }
                     }
                 }
 
-                // Grid Buttons
-                val calcButtons = listOf(
-                    listOf("C", "(", ")", "÷"),
-                    listOf("৭", "৮", "৯", "×"),
-                    listOf("৪", "৫", "৬", "-"),
-                    listOf("১", "২", "৩", "+"),
-                    listOf("০", ".", "⌫", "=")
-                )
-
+                // --- DISPLAY AREA (HISTORY STACK & MAIN OUTPUT) ---
                 Column(
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 140.dp)
+                        .padding(horizontal = 8.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.Bottom,
+                    horizontalAlignment = Alignment.End
+                ) {
+                    // History stack lines from persistent 24h storage
+                    if (showScreenHistory) {
+                        historyItems.takeLast(3).forEach { item ->
+                            val formattedHistExpr = item.expression
+                                .replace("/", " : ")
+                                .replace("*", " X ")
+                                .replace("+", " + ")
+                                .replace("-", " − ")
+                            
+                            val formattedHistRes = try {
+                                val doubleVal = item.result.replace(",", "").toDoubleOrNull()
+                                if (doubleVal != null) {
+                                    java.text.NumberFormat.getNumberInstance(java.util.Locale.US).format(doubleVal)
+                                } else item.result
+                            } catch (e: Exception) { item.result }
+
+                            Text(
+                                text = formattedHistExpr,
+                                color = historyTextColor.copy(alpha = 0.85f),
+                                fontSize = 13.sp,
+                                textAlign = TextAlign.End,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            Text(
+                                text = "= $formattedHistRes",
+                                color = historyTextColor.copy(alpha = 0.85f),
+                                fontSize = 13.sp,
+                                textAlign = TextAlign.End,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(bottom = 6.dp)
+                            )
+                        }
+                    }
+
+                    // Active Typing Expression or Preview
+                    if (expression.isNotBlank() && resultText != expression) {
+                        val activeFormatted = expression
+                            .replace("/", " : ")
+                            .replace("*", " X ")
+                            .replace("+", " + ")
+                            .replace("-", " − ")
+                        Text(
+                            text = activeFormatted,
+                            color = historyTextColor,
+                            fontSize = 15.sp,
+                            textAlign = TextAlign.End,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+
+                    // Main Result Display (Formatted with commas)
+                    val displayResultFormatted = try {
+                        val doubleVal = resultText.replace(",", "").toDoubleOrNull()
+                        if (doubleVal != null) {
+                            java.text.NumberFormat.getNumberInstance(java.util.Locale.US).format(doubleVal)
+                        } else resultText
+                    } catch (e: Exception) { resultText }
+
+                    Text(
+                        text = displayResultFormatted,
+                        color = mainDisplayTextColor,
+                        fontSize = 34.sp,
+                        fontWeight = FontWeight.Bold,
+                        textAlign = TextAlign.End,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 4.dp)
+                            .pointerInput(resultText) {
+                                detectTapGestures(
+                                    onLongPress = {
+                                        if (resultText != "0" && resultText.isNotBlank()) {
+                                            showTransferPopup = true
+                                        }
+                                    }
+                                )
+                            }
+                    )
+
+                    // Helper tooltip hint for long-press transfer
+                    Text(
+                        text = "এন্ট্রিতে যোগ করতে ফলাফলের উপর চেপে ধরে রাখুন",
+                        color = historyTextColor.copy(alpha = 0.6f),
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Medium,
+                        textAlign = TextAlign.End,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 2.dp, bottom = 8.dp)
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(6.dp))
+
+                // --- LOWER KEYPAD CONTAINER ---
+                Surface(
+                    shape = RoundedCornerShape(28.dp),
+                    color = keypadBg,
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    calcButtons.forEach { row ->
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            row.forEach { btnText ->
-                                val isOperator = btnText in listOf("C", "(", ")", "÷", "×", "-", "+", "⌫", "=")
-                                val buttonColor = if (btnText == "=") {
-                                    Color(0xFF10B981) // Green
-                                } else if (btnText == "C" || btnText == "⌫") {
-                                    Color(0xFFEF4444) // Red
-                                } else if (isOperator) {
-                                    Color(0xFF1E3A8A) // Dark Royal Blue
-                                } else {
-                                    Color(0xFF172554) // Darker Royal Blue for numbers
-                                }
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        val calcRows = listOf(
+                            listOf("C", "⌫", "%", "÷"),
+                            listOf("7", "8", "9", "X"),
+                            listOf("4", "5", "6", "−"),
+                            listOf("1", "2", "3", "+"),
+                            listOf("0", ".", "⁺/₋", "=")
+                        )
 
-                                val textColor = if (btnText == "=" || btnText == "C" || btnText == "⌫") {
-                                    Color.White
-                                } else if (isOperator) {
-                                    Color.White
-                                } else {
-                                    Color(0xFFFBBF24) // Dark Yellow
-                                }
+                        calcRows.forEach { row ->
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                row.forEach { btn ->
+                                    val isOperator = btn in listOf("÷", "X", "−", "+", "=")
+                                    val btnBg = if (isOperator) operatorBtnBg else utilityBtnBg
+                                    val btnTxtColor = if (isOperator) operatorBtnTextColor else utilityBtnTextColor
 
-                                CalcButton3D(
-                                    text = btnText,
-                                    onClick = {
-                                        when (btnText) {
-                                            "C" -> {
-                                                expression = ""
-                                                resultText = "0"
-                                            }
-                                            "⌫" -> {
-                                                if (expression.isNotEmpty()) {
-                                                    expression = expression.substring(0, expression.length - 1)
+                                    CalcButton3D(
+                                        text = btn,
+                                        onClick = {
+                                            when (btn) {
+                                                "C" -> {
+                                                    expression = ""
+                                                    resultText = "0"
+                                                    showScreenHistory = false
                                                 }
-                                            }
-                                            "=" -> {
-                                                try {
-                                                    var evalExpr = expression.trim()
-                                                    while (evalExpr.isNotEmpty() && (evalExpr.endsWith("+") || evalExpr.endsWith("-") || evalExpr.endsWith("*") || evalExpr.endsWith("/"))) {
-                                                        evalExpr = evalExpr.substring(0, evalExpr.length - 1).trim()
+                                                "⌫" -> {
+                                                    if (expression.isNotEmpty()) {
+                                                        expression = expression.substring(0, expression.length - 1)
                                                     }
-                                                    if (evalExpr.isNotBlank()) {
-                                                        val res = SimpleMathParser.eval(evalExpr)
-                                                        val finalVal = formatCalcResult(res)
+                                                }
+                                                "%" -> {
+                                                    try {
+                                                        val res = SimpleMathParser.eval(if (expression.isBlank()) resultText else expression)
+                                                        val pct = res / 100.0
+                                                        val finalVal = formatCalcResult(pct)
                                                         expression = finalVal
                                                         resultText = finalVal
+                                                    } catch (e: Exception) {
+                                                        // ignore error
                                                     }
-                                                } catch (e: Exception) {
-                                                    resultText = "ভুল এক্সপ্রেশন"
+                                                }
+                                                "⁺/₋" -> {
+                                                    if (expression.startsWith("-")) {
+                                                        expression = expression.substring(1)
+                                                    } else if (expression.isNotBlank()) {
+                                                        expression = "-$expression"
+                                                    } else if (resultText != "0") {
+                                                        expression = if (resultText.startsWith("-")) resultText.substring(1) else "-$resultText"
+                                                    }
+                                                }
+                                                "=" -> {
+                                                    try {
+                                                        var evalExpr = expression.trim()
+                                                        while (evalExpr.isNotEmpty() && (evalExpr.endsWith("+") || evalExpr.endsWith("-") || evalExpr.endsWith("*") || evalExpr.endsWith("/"))) {
+                                                            evalExpr = evalExpr.substring(0, evalExpr.length - 1).trim()
+                                                        }
+                                                        if (evalExpr.isNotBlank()) {
+                                                            val res = SimpleMathParser.eval(evalExpr)
+                                                            val finalVal = formatCalcResult(res)
+                                                            
+                                                            // Persist to 24-hour history immediately
+                                                            val newItem = CalcHistoryItem(evalExpr, finalVal, System.currentTimeMillis())
+                                                            val newHistoryList = historyItems + newItem
+                                                            historyItems = newHistoryList
+                                                            saveCalcHistory(context, newHistoryList)
+
+                                                            expression = finalVal
+                                                            resultText = finalVal
+                                                            showScreenHistory = true
+                                                        }
+                                                    } catch (e: Exception) {
+                                                        resultText = "ভুল এক্সপ্রেশন"
+                                                    }
+                                                }
+                                                else -> {
+                                                    val mappedChar = when (btn) {
+                                                        "X" -> "*"
+                                                        "÷" -> "/"
+                                                        "−" -> "-"
+                                                        else -> btn
+                                                    }
+                                                    expression += mappedChar
                                                 }
                                             }
-                                            else -> {
-                                                val mappedChar = when (btnText) {
-                                                    "০" -> "0"
-                                                    "১" -> "1"
-                                                    "২" -> "2"
-                                                    "৩" -> "3"
-                                                    "৪" -> "4"
-                                                    "৫" -> "5"
-                                                    "৬" -> "6"
-                                                    "৭" -> "7"
-                                                    "৮" -> "8"
-                                                    "৯" -> "9"
-                                                    "×" -> "*"
-                                                    "÷" -> "/"
-                                                    else -> btnText
-                                                }
-                                                expression += mappedChar
-                                            }
-                                        }
-                                    },
-                                    containerColor = buttonColor,
-                                    textColor = textColor,
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .height(44.dp)
-                                )
+                                        },
+                                        containerColor = btnBg,
+                                        textColor = btnTxtColor,
+                                        isCalcDarkMode = isCalcDarkMode,
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .height(52.dp)
+                                    )
+                                }
                             }
                         }
                     }
@@ -9518,18 +10325,185 @@ fun Royal3DCalculatorDialog(
         }
     }
 
+    // --- 24-HOUR CALCULATOR HISTORY DIALOG ---
+    if (showHistoryDialog) {
+        Dialog(
+            onDismissRequest = { showHistoryDialog = false },
+            properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)
+        ) {
+            Card(
+                shape = RoundedCornerShape(28.dp),
+                colors = CardDefaults.cardColors(containerColor = if (isCalcDarkMode) Color(0xFF1E293B) else Color.White),
+                elevation = CardDefaults.cardElevation(defaultElevation = 10.dp),
+                modifier = Modifier
+                    .fillMaxWidth(0.9f)
+                    .heightIn(max = 500.dp)
+                    .padding(16.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(18.dp)
+                ) {
+                    // Header
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.History,
+                                contentDescription = null,
+                                tint = Color(0xFFEA580C)
+                            )
+                            Column {
+                                Text(
+                                    text = "ক্যালকুলেটর ইতিহাস",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 16.sp,
+                                    color = if (isCalcDarkMode) Color.White else Color(0xFF0F172A)
+                                )
+                                Text(
+                                    text = "২৪ ঘণ্টা পর স্বয়ংক্রিয়ভাবে মুছে যাবে",
+                                    fontSize = 10.sp,
+                                    color = if (isCalcDarkMode) Color(0xFF94A3B8) else Color(0xFF64748B)
+                                )
+                            }
+                        }
+
+                        IconButton(
+                            onClick = { showHistoryDialog = false },
+                            modifier = Modifier.size(30.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Close",
+                                tint = if (isCalcDarkMode) Color(0xFF94A3B8) else Color(0xFF64748B)
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    if (historyItems.isEmpty()) {
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxWidth(),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "বিগত ২৪ ঘণ্টায় কোনো হিসাব পাওয়া যায়নি",
+                                color = if (isCalcDarkMode) Color(0xFF94A3B8) else Color(0xFF64748B),
+                                fontSize = 13.sp,
+                                textAlign = TextAlign.Center
+                            )
+                        }
+                    } else {
+                        LazyColumn(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            items(historyItems.reversed()) { item ->
+                                Surface(
+                                    onClick = {
+                                        expression = item.expression
+                                        resultText = item.result
+                                        showScreenHistory = true
+                                        showHistoryDialog = false
+                                        Toast.makeText(context, "হিসাব লোড করা হয়েছে", Toast.LENGTH_SHORT).show()
+                                    },
+                                    shape = RoundedCornerShape(14.dp),
+                                    color = if (isCalcDarkMode) Color(0xFF334155) else Color(0xFFF1F5F9),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(12.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = item.expression
+                                                    .replace("/", " : ")
+                                                    .replace("*", " X ")
+                                                    .replace("+", " + ")
+                                                    .replace("-", " − "),
+                                                fontSize = 12.sp,
+                                                color = if (isCalcDarkMode) Color(0xFFCBD5E1) else Color(0xFF475569)
+                                            )
+                                            Text(
+                                                text = "= ${item.result}",
+                                                fontSize = 16.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = Color(0xFFEA580C)
+                                            )
+                                        }
+
+                                        Surface(
+                                            shape = RoundedCornerShape(8.dp),
+                                            color = if (isCalcDarkMode) Color(0xFF1E293B) else Color(0xFFE2E7EB)
+                                        ) {
+                                            Text(
+                                                text = formatTimeAgoBn(item.timestamp),
+                                                fontSize = 10.sp,
+                                                color = if (isCalcDarkMode) Color(0xFF94A3B8) else Color(0xFF64748B),
+                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        // Clear history button
+                        Button(
+                            onClick = {
+                                historyItems = emptyList()
+                                saveCalcHistory(context, emptyList())
+                                Toast.makeText(context, "ইতিহাস মুছে ফেলা হয়েছে", Toast.LENGTH_SHORT).show()
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFEF4444)),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Delete,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("সব ইতিহাস মুছুন", color = Color.White, fontSize = 13.sp)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // --- NOTEBOOK TRANSFER POPUP ---
     if (showTransferPopup) {
         AlertDialog(
             onDismissRequest = { showTransferPopup = false },
-            containerColor = Color(0xFF0F172A),
-            titleContentColor = Color.White,
-            textContentColor = Color.White,
+            containerColor = if (isCalcDarkMode) Color(0xFF1E293B) else Color.White,
+            titleContentColor = if (isCalcDarkMode) Color.White else Color(0xFF0F172A),
+            textContentColor = if (isCalcDarkMode) Color.White else Color(0xFF0F172A),
             title = {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Icon(imageVector = Icons.Default.Send, contentDescription = null, tint = Color(0xFF3B82F6))
+                    Icon(imageVector = Icons.Default.Send, contentDescription = null, tint = Color(0xFFEA580C))
                     Text("হিসাব খাতায় যোগ করুন", fontSize = 16.sp, fontWeight = FontWeight.Bold)
                 }
             },
@@ -9539,12 +10513,12 @@ fun Royal3DCalculatorDialog(
                         text = "ফলাফল: ৳ ${resultText.toBanglaDigits()}",
                         fontSize = 20.sp,
                         fontWeight = FontWeight.Black,
-                        color = Color(0xFFFBBF24)
+                        color = Color(0xFFEA580C)
                     )
                     Text(
                         text = "এই মানটি আপনার নোটবুকে কি হিসেবে এন্ট্রি করতে চান?",
                         fontSize = 12.sp,
-                        color = Color(0xFF94A3B8)
+                        color = historyTextColor
                     )
                 }
             },
@@ -9581,7 +10555,7 @@ fun Royal3DCalculatorDialog(
                         onClick = { showTransferPopup = false },
                         modifier = Modifier.align(Alignment.CenterHorizontally)
                     ) {
-                        Text("বাতিল", color = Color(0xFF94A3B8), fontWeight = FontWeight.Bold)
+                        Text("বাতিল", color = historyTextColor, fontWeight = FontWeight.Bold)
                     }
                 }
             }
@@ -9589,48 +10563,46 @@ fun Royal3DCalculatorDialog(
     }
 }
 
+// --- SQUIRCLE 3D CALCULATOR BUTTON MATCHING MOCKUP ---
 @Composable
 fun CalcButton3D(
     text: String,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     containerColor: Color,
-    textColor: Color
+    textColor: Color,
+    isCalcDarkMode: Boolean = true
 ) {
-    Box(
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(18.dp),
+        color = containerColor,
+        shadowElevation = if (!isCalcDarkMode && containerColor == Color.White) 2.dp else 1.dp,
         modifier = modifier
-            .clickable { onClick() }
     ) {
-        // Shadow base layer
-        Surface(
-            modifier = Modifier
-                .fillMaxSize()
-                .offset(y = 3.dp),
-            shape = RoundedCornerShape(10.dp),
-            color = containerColor.copy(alpha = 0.5f)
-        ) {}
-
-        // Front interactive layer
-        Surface(
-            modifier = Modifier.fillMaxSize(),
-            shape = RoundedCornerShape(10.dp),
-            color = containerColor,
-            border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f))
+        Box(
+            contentAlignment = Alignment.Center,
+            modifier = Modifier.fillMaxSize()
         ) {
-            Box(
-                contentAlignment = Alignment.Center,
-                modifier = Modifier.fillMaxSize()
-            ) {
+            if (text == "⌫") {
+                Icon(
+                    imageVector = Icons.Default.Backspace,
+                    contentDescription = "Backspace",
+                    tint = textColor,
+                    modifier = Modifier.size(20.dp)
+                )
+            } else {
                 Text(
                     text = text,
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.Bold,
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.SemiBold,
                     color = textColor
                 )
             }
         }
     }
 }
+
 
 // --- DYNAMIC SETTINGS DIALOG (TARGETS, THEMES, DATABASE RESET, BACKUPS) ---
 @Composable
@@ -9661,18 +10633,26 @@ fun SettingsDialog(
     var showImportDialog by remember { mutableStateOf(false) }
     var showOtherSettings by remember { mutableStateOf(false) }
 
+    val coroutineScope = rememberCoroutineScope()
+
     val createDocumentLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("application/json")
     ) { uri ->
         if (uri != null) {
-            try {
-                val content = viewModel.exportBackup()
-                context.contentResolver.openOutputStream(uri)?.use { outputStream ->
-                    outputStream.write(content.toByteArray())
+            coroutineScope.launch(Dispatchers.IO) {
+                try {
+                    val content = viewModel.exportBackup()
+                    context.contentResolver.openOutputStream(uri)?.use { outputStream ->
+                        outputStream.write(content.toByteArray())
+                    }
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(context, "ব্যাকআপ সফলভাবে ফাইলে সংরক্ষণ করা হয়েছে!", Toast.LENGTH_SHORT).show()
+                    }
+                } catch (e: Exception) {
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(context, "ব্যাকআপ ফাইল তৈরিতে ব্যর্থতা: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
+                    }
                 }
-                Toast.makeText(context, "ব্যাকআপ সফলভাবে ফাইলে সংরক্ষণ করা হয়েছে!", Toast.LENGTH_SHORT).show()
-            } catch (e: Exception) {
-                Toast.makeText(context, "ব্যাকআপ ফাইল তৈরিতে ব্যর্থতা: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
             }
         }
     }
@@ -9681,14 +10661,20 @@ fun SettingsDialog(
         contract = ActivityResultContracts.CreateDocument("text/comma-separated-values")
     ) { uri ->
         if (uri != null) {
-            try {
-                val content = viewModel.exportBackupCsv()
-                context.contentResolver.openOutputStream(uri)?.use { outputStream ->
-                    outputStream.write(content.toByteArray())
+            coroutineScope.launch(Dispatchers.IO) {
+                try {
+                    val content = viewModel.exportBackupCsv()
+                    context.contentResolver.openOutputStream(uri)?.use { outputStream ->
+                        outputStream.write(content.toByteArray())
+                    }
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(context, "এক্সেল হিসাব সফলভাবে CSV ফাইলে সংরক্ষণ করা হয়েছে!", Toast.LENGTH_SHORT).show()
+                    }
+                } catch (e: Exception) {
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(context, "CSV ফাইল তৈরিতে ব্যর্থতা: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
+                    }
                 }
-                Toast.makeText(context, "এক্সেল হিসাব সফলভাবে CSV ফাইলে সংরক্ষণ করা হয়েছে!", Toast.LENGTH_SHORT).show()
-            } catch (e: Exception) {
-                Toast.makeText(context, "CSV ফাইল তৈরিতে ব্যর্থতা: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
             }
         }
     }
@@ -12391,136 +13377,200 @@ fun DashboardHomeScreen(
                 }
             )
 
-            // 3. ORIGINAL REAL-TIME SUMMARY CARD WITH 3D BORDER (Semi-transparent background)
+            // 3. ULTRA-SLIM REAL-TIME SUMMARY BAR (একদম চিকন সারাংশ বার)
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(containerColor = Color(0xCC0F172A)),
-                shape = RoundedCornerShape(16.dp),
-                border = BorderStroke(1.2.dp, Color(0xFF3B82F6).copy(alpha = 0.35f))
+                shape = RoundedCornerShape(12.dp),
+                border = BorderStroke(1.dp, Color(0xFF3B82F6).copy(alpha = 0.35f))
             ) {
-                Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
-                    Text(
-                        text = "রিয়েল-টাইম সারাংশ (সব খাতা)",
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Color(0xFF94A3B8)
-                    )
-                    
-                    Spacer(modifier = Modifier.height(6.dp))
-                    
+                Column {
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 10.dp, vertical = 7.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        // Total Income (green accent)
-                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                Box(modifier = Modifier.size(5.dp).background(Color(0xFF10B981), CircleShape))
-                                Text("মোট আয়", fontSize = 10.sp, color = Color(0xFF94A3B8))
-                            }
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(6.dp)
+                                    .background(Color(0xFF3B82F6), CircleShape)
+                            )
                             Text(
-                                text = "৳ ${totalIncome.toInt().toBangla()}",
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.Black,
-                                color = Color(0xFF34D399)
+                                text = "সারাংশ:",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF94A3B8)
                             )
                         }
 
-                        // Total Expense (red accent)
-                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                Box(modifier = Modifier.size(5.dp).background(Color(0xFFEF4444), CircleShape))
-                                Text("মোট ব্যয়", fontSize = 10.sp, color = Color(0xFF94A3B8))
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            // Total Income
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                Text("আয়:", fontSize = 10.sp, color = Color(0xFF94A3B8))
+                                Text(
+                                    text = "৳${totalIncome.toInt().toBangla()}",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFF34D399)
+                                )
                             }
-                            Text(
-                                text = "৳ ${totalExpense.toInt().toBangla()}",
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.Black,
-                                color = Color(0xFFF87171)
-                            )
-                        }
 
-                        // Remaining Balance (cyan accent)
-                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                Box(modifier = Modifier.size(5.dp).background(Color(0xFF22D3EE), CircleShape))
-                                Text("অবশিষ্ট", fontSize = 10.sp, color = Color(0xFF94A3B8))
+                            Text("|", color = Color(0xFF334155), fontSize = 10.sp)
+
+                            // Total Expense
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                Text("ব্যয়:", fontSize = 10.sp, color = Color(0xFF94A3B8))
+                                Text(
+                                    text = "৳${totalExpense.toInt().toBangla()}",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFFF87171)
+                                )
                             }
-                            Text(
-                                text = "৳ ${balance.toInt().toBangla()}",
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.Black,
-                                color = Color(0xFF22D3EE)
-                            )
+
+                            Text("|", color = Color(0xFF334155), fontSize = 10.sp)
+
+                            // Balance
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                Text("অবশিষ্ট:", fontSize = 10.sp, color = Color(0xFF94A3B8))
+                                Text(
+                                    text = "৳${balance.toInt().toBangla()}",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFF22D3EE)
+                                )
+                            }
                         }
                     }
 
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    // Mini balance ratio gauge bar
+                    // Ultra-thin 2dp ratio bar
                     val totalSum = totalIncome + totalExpense
                     val incomePercent = if (totalSum > 0) (totalIncome / totalSum).toFloat() else 0.5f
                     val expensePercent = 1f - incomePercent
 
-                    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text(
-                                text = "আয়: ${(incomePercent * 100).toInt().toBangla()}%",
-                                fontSize = 8.5.sp,
-                                color = Color(0xFF34D399),
-                                fontWeight = FontWeight.Bold
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(2.dp)
+                            .background(Color.White.copy(alpha = 0.05f))
+                    ) {
+                        Row(modifier = Modifier.fillMaxSize()) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxHeight()
+                                    .weight(if (incomePercent > 0f) incomePercent else 0.01f)
+                                    .background(Color(0xFF10B981))
                             )
-                            Text(
-                                text = "ব্যয়: ${(expensePercent * 100).toInt().toBangla()}%",
-                                fontSize = 8.5.sp,
-                                color = Color(0xFFF87171),
-                                fontWeight = FontWeight.Bold
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxHeight()
+                                    .weight(if (expensePercent > 0f) expensePercent else 0.01f)
+                                    .background(Color(0xFFEF4444))
                             )
-                        }
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(4.dp)
-                                .clip(RoundedCornerShape(2.dp))
-                                .background(Color.White.copy(alpha = 0.05f))
-                        ) {
-                            Row(modifier = Modifier.fillMaxSize()) {
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxHeight()
-                                        .weight(if (incomePercent > 0f) incomePercent else 0.01f)
-                                        .background(Color(0xFF10B981))
-                                )
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxHeight()
-                                        .weight(if (expensePercent > 0f) expensePercent else 0.01f)
-                                        .background(Color(0xFFEF4444))
-                                )
-                            }
                         }
                     }
                 }
             }
 
-            // 4. THE TWO-COLUMN GRID OF FEATURE CARDS (Shifted downward smoothly)
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            // 4. NOTEBOOK BAR AND FEATURE BARS PLACED BELOW THE SUMMARY DASHBOARD
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                // Prominent Full-Width NoteBook Bar
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onNavigateToDailyAccounts() },
+                    colors = CardDefaults.cardColors(containerColor = Color(0xCC0F172A)),
+                    shape = RoundedCornerShape(14.dp),
+                    border = BorderStroke(1.2.dp, Color(0xFF3B82F6).copy(alpha = 0.45f))
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .background(Color(0xFF3B82F6).copy(alpha = 0.2f), RoundedCornerShape(10.dp)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.MenuBook,
+                                    contentDescription = null,
+                                    tint = Color(0xFF60A5FA),
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                            Column {
+                                Text(
+                                    text = "নোট বুক (দৈনিক হিসাব খাতা)",
+                                    fontSize = 13.5.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White
+                                )
+                                Text(
+                                    text = if (currentKhataMode == "ALT") "বিকল্প খাতা মোড চালু আছে" else "সাধারণ হিসাব খাতা মোড চালু আছে",
+                                    fontSize = 10.5.sp,
+                                    color = Color(0xFF94A3B8)
+                                )
+                            }
+                        }
+
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = Color(0xFF3B82F6).copy(alpha = 0.2f)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Text(
+                                    text = "খুলুন",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFF60A5FA)
+                                )
+                                Icon(
+                                    imageVector = Icons.Default.ArrowForward,
+                                    contentDescription = null,
+                                    tint = Color(0xFF60A5FA),
+                                    modifier = Modifier.size(12.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // Row of Other Feature Bars
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    DashboardCard(
-                        title = "নোট বুক",
-                        icon = Icons.Default.Calculate,
-                        iconColor = Color(0xFF3B82F6),
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        onNavigateToDailyAccounts()
-                    }
-
                     DashboardCard(
                         title = "রিপোর্ট ও গ্রাফ",
                         icon = Icons.Default.TrendingUp,
@@ -12529,12 +13579,7 @@ fun DashboardHomeScreen(
                     ) {
                         onNavigateToReportsGraphs()
                     }
-                }
 
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
                     DashboardCard(
                         title = "সেট বাজেট",
                         icon = Icons.Default.PieChart,
@@ -12562,7 +13607,7 @@ fun DashboardHomeScreen(
                 savedLocations = savedFavoriteLocationsVal,
                 onDismiss = { showLocationSelectionDialog = false },
                 onSelectPreset = { name, lat, lon ->
-                    viewModel.saveManualLocation(name, lat, lon)
+                    viewModel.saveManualLocation(name, lat, lon, context)
                     Toast.makeText(context, "স্থান পরিবর্তন করা হয়েছে: $name", Toast.LENGTH_SHORT).show()
                     showLocationSelectionDialog = false
                 },
