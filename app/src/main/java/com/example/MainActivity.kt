@@ -13490,87 +13490,22 @@ fun DashboardHomeScreen(
                 }
             }
 
-            // 4. NOTEBOOK BAR AND FEATURE BARS PLACED BELOW THE SUMMARY DASHBOARD
+            // 4. COMPACT 2X2 GRID OF FEATURE CARDS (নোট বুক, রিপোর্ট ও গ্রাফ, সেট বাজেট, ক্যালকুলেটর)
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                // Prominent Full-Width NoteBook Bar
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { onNavigateToDailyAccounts() },
-                    colors = CardDefaults.cardColors(containerColor = Color(0xCC0F172A)),
-                    shape = RoundedCornerShape(14.dp),
-                    border = BorderStroke(1.2.dp, Color(0xFF3B82F6).copy(alpha = 0.45f))
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 12.dp, vertical = 10.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(36.dp)
-                                    .background(Color(0xFF3B82F6).copy(alpha = 0.2f), RoundedCornerShape(10.dp)),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.MenuBook,
-                                    contentDescription = null,
-                                    tint = Color(0xFF60A5FA),
-                                    modifier = Modifier.size(20.dp)
-                                )
-                            }
-                            Column {
-                                Text(
-                                    text = "নোট বুক (দৈনিক হিসাব খাতা)",
-                                    fontSize = 13.5.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = Color.White
-                                )
-                                Text(
-                                    text = if (currentKhataMode == "ALT") "বিকল্প খাতা মোড চালু আছে" else "সাধারণ হিসাব খাতা মোড চালু আছে",
-                                    fontSize = 10.5.sp,
-                                    color = Color(0xFF94A3B8)
-                                )
-                            }
-                        }
-
-                        Surface(
-                            shape = RoundedCornerShape(8.dp),
-                            color = Color(0xFF3B82F6).copy(alpha = 0.2f)
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(4.dp)
-                            ) {
-                                Text(
-                                    text = "খুলুন",
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = Color(0xFF60A5FA)
-                                )
-                                Icon(
-                                    imageVector = Icons.Default.ArrowForward,
-                                    contentDescription = null,
-                                    tint = Color(0xFF60A5FA),
-                                    modifier = Modifier.size(12.dp)
-                                )
-                            }
-                        }
-                    }
-                }
-
-                // Row of Other Feature Bars
+                // Top Row: নোট বুক + রিপোর্ট ও গ্রাফ
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
+                    DashboardCard(
+                        title = "নোট বুক",
+                        icon = Icons.Default.MenuBook,
+                        iconColor = Color(0xFF3B82F6),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        onNavigateToDailyAccounts()
+                    }
+
                     DashboardCard(
                         title = "রিপোর্ট ও গ্রাফ",
                         icon = Icons.Default.TrendingUp,
@@ -13579,7 +13514,13 @@ fun DashboardHomeScreen(
                     ) {
                         onNavigateToReportsGraphs()
                     }
+                }
 
+                // Bottom Row: সেট বাজেট + ক্যালকুলেটর
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
                     DashboardCard(
                         title = "সেট বাজেট",
                         icon = Icons.Default.PieChart,
@@ -13592,7 +13533,7 @@ fun DashboardHomeScreen(
                     DashboardCard(
                         title = "ক্যালকুলেটর",
                         icon = Icons.Default.Calculate,
-                        iconColor = Color(0xFF3B82F6),
+                        iconColor = Color(0xFF818CF8),
                         modifier = Modifier.weight(1f)
                     ) {
                         onCalculatorClick()
@@ -15024,7 +14965,7 @@ fun DashboardCard(
 ) {
     Card(
         modifier = modifier
-            .heightIn(min = if (subtext.isEmpty()) 52.dp else 96.dp)
+            .heightIn(min = if (subtext.isEmpty()) 44.dp else 84.dp)
             .clickable { onClick() },
         colors = CardDefaults.cardColors(containerColor = Color(0xCC0F172A)),
         shape = RoundedCornerShape(12.dp),
@@ -15034,29 +14975,31 @@ fun DashboardCard(
             Row(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Box(
                     modifier = Modifier
-                        .size(30.dp)
-                        .background(iconColor.copy(alpha = 0.15f), RoundedCornerShape(8.dp)),
+                        .size(26.dp)
+                        .background(iconColor.copy(alpha = 0.15f), RoundedCornerShape(7.dp)),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
                         imageVector = icon,
                         contentDescription = null,
                         tint = iconColor,
-                        modifier = Modifier.size(15.dp)
+                        modifier = Modifier.size(14.dp)
                     )
                 }
 
                 Text(
                     text = title,
-                    fontSize = 12.sp,
+                    fontSize = 11.sp,
                     fontWeight = FontWeight.Bold,
                     color = Color.White,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f)
                 )
 
@@ -15064,7 +15007,7 @@ fun DashboardCard(
                     imageVector = Icons.Default.ArrowForward,
                     contentDescription = null,
                     tint = Color(0xFF475569),
-                    modifier = Modifier.size(13.dp)
+                    modifier = Modifier.size(11.dp)
                 )
             }
         } else {
