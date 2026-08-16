@@ -42,6 +42,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -1738,6 +1739,14 @@ class MainViewModel(private val repository: DailyEntryRepository, private val co
             ?.split(",")?.toMutableList() ?: mutableListOf("খাদ্য", "যাতায়াত", "বেতন", "উপহার", "অন্যান্য")
     )
 
+    val closedFolders = MutableStateFlow<Set<String>>(
+        prefs.getString("CLOSED_FOLDERS", "")
+            ?.split(",")
+            ?.map { it.trim() }
+            ?.filter { it.isNotBlank() }
+            ?.toSet() ?: emptySet()
+    )
+
     val wageRate = MutableStateFlow(prefs.getFloat("WAGE_RATE", 50.0f).toDouble())
     val dailyTarget = MutableStateFlow(prefs.getInt("DAILY_TARGET", 800))
     val dailyBudget = MutableStateFlow(prefs.getFloat("DAILY_BUDGET", 500.0f).toDouble())
@@ -2034,7 +2043,7 @@ class MainViewModel(private val repository: DailyEntryRepository, private val co
 
     fun changeKhataMode(mode: String) {
         currentKhataMode.value = mode
-        prefs.edit().putString("KHATA_MODE", mode).apply()
+        prefs.edit().putString("KHATA_MODE", mode).commit()
         when (mode) {
             "MAIN" -> selectedFolder.value = selectedFolderMain.value
             "ALT" -> selectedFolder.value = selectedFolderAlt.value
@@ -2071,18 +2080,18 @@ class MainViewModel(private val repository: DailyEntryRepository, private val co
         when (currentKhataMode.value) {
             "MAIN" -> {
                 selectedFolderMain.value = folder
-                prefs.edit().putString("SELECTED_FOLDER_MAIN", folder).apply()
+                prefs.edit().putString("SELECTED_FOLDER_MAIN", folder).commit()
             }
             "ALT" -> {
                 selectedFolderAlt.value = folder
-                prefs.edit().putString("SELECTED_FOLDER_ALT", folder).apply()
+                prefs.edit().putString("SELECTED_FOLDER_ALT", folder).commit()
             }
             "PREMIUM" -> {
                 selectedFolderPremium.value = folder
-                prefs.edit().putString("SELECTED_FOLDER_PREMIUM", folder).apply()
+                prefs.edit().putString("SELECTED_FOLDER_PREMIUM", folder).commit()
             }
         }
-        prefs.edit().putString("SELECTED_FOLDER", folder).apply()
+        prefs.edit().putString("SELECTED_FOLDER", folder).commit()
     }
 
     fun addFolder(folder: String) {
@@ -2091,25 +2100,28 @@ class MainViewModel(private val repository: DailyEntryRepository, private val co
                 "MAIN" -> {
                     val current = mainFolders.value.toMutableList()
                     if (!current.contains(folder)) {
-                        current.add(folder)
+                        current.add(0, folder)
                         mainFolders.value = current
                         prefs.edit().putString("FOLDERS", current.joinToString(",")).apply()
+                        selectFolder(folder)
                     }
                 }
                 "ALT" -> {
                     val current = altFolders.value.toMutableList()
                     if (!current.contains(folder)) {
-                        current.add(folder)
+                        current.add(0, folder)
                         altFolders.value = current
                         prefs.edit().putString("FOLDERS_ALT", current.joinToString(",")).apply()
+                        selectFolder(folder)
                     }
                 }
                 "PREMIUM" -> {
                     val current = premiumFolders.value.toMutableList()
                     if (!current.contains(folder)) {
-                        current.add(folder)
+                        current.add(0, folder)
                         premiumFolders.value = current
                         prefs.edit().putString("FOLDERS_PREMIUM", current.joinToString(",")).apply()
+                        selectFolder(folder)
                     }
                 }
             }
@@ -2173,6 +2185,42 @@ class MainViewModel(private val repository: DailyEntryRepository, private val co
                 }
             }
         }
+        // Also remove from closed folders if it was closed
+        val currentClosed = closedFolders.value.toMutableSet()
+        if (currentClosed.contains(folder) || currentClosed.contains("★ $folder") || currentClosed.contains("✦ $folder")) {
+            currentClosed.remove(folder)
+            currentClosed.remove("★ $folder")
+            currentClosed.remove("✦ $folder")
+            closedFolders.value = currentClosed
+            prefs.edit().putString("CLOSED_FOLDERS", currentClosed.joinToString(",")).apply()
+        }
+    }
+
+    fun toggleCloseAndPaidFolder(folder: String) {
+        if (folder.isBlank() || folder == "সব ফোল্ডার") return
+        val current = closedFolders.value.toMutableSet()
+        val cleanName = folder.removePrefix("★ ").removePrefix("✦ ").trim()
+        val isCurrentlyClosed = current.contains(folder) || current.contains(cleanName)
+        if (isCurrentlyClosed) {
+            current.remove(folder)
+            current.remove(cleanName)
+            current.remove("★ $cleanName")
+            current.remove("✦ $cleanName")
+        } else {
+            current.add(folder)
+            current.add(cleanName)
+        }
+        closedFolders.value = current
+        prefs.edit().putString("CLOSED_FOLDERS", current.joinToString(",")).commit()
+        triggerAutoBackup(immediate = true)
+        triggerCloudSync(immediate = true)
+    }
+
+    fun isFolderClosed(folder: String): Boolean {
+        if (folder.isBlank() || folder == "সব ফোল্ডার") return false
+        val cleanName = folder.removePrefix("★ ").removePrefix("✦ ").trim()
+        return closedFolders.value.contains(folder) || closedFolders.value.contains(cleanName) ||
+                closedFolders.value.contains("★ $cleanName") || closedFolders.value.contains("✦ $cleanName")
     }
 
     fun addCustomCategory(cat: String) {
@@ -2279,6 +2327,7 @@ class MainViewModel(private val repository: DailyEntryRepository, private val co
             root.put("savedLat", prefs.getString("SAVED_LAT", ""))
             root.put("savedLon", prefs.getString("SAVED_LON", ""))
             root.put("liveLocationName", prefs.getString("LIVE_LOCATION_NAME", ""))
+            root.put("closedFolders", closedFolders.value.joinToString(","))
             
             // Return base64 or raw string
             root.toString()
@@ -2367,6 +2416,13 @@ class MainViewModel(private val repository: DailyEntryRepository, private val co
                 val list = root.getString("categories").split(",").toMutableList()
                 customCategoriesList.value = list
                 prefs.edit().putString("CUSTOM_CATEGORIES", list.joinToString(",")).apply()
+            }
+
+            if (root.has("closedFolders")) {
+                val cfStr = root.optString("closedFolders", "")
+                val set = cfStr.split(",").map { it.trim() }.filter { it.isNotBlank() }.toSet()
+                closedFolders.value = set
+                prefs.edit().putString("CLOSED_FOLDERS", set.joinToString(",")).apply()
             }
 
             if (root.has("savedFavoriteLocations")) {
@@ -2591,6 +2647,10 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
     val currentKhataMode by viewModel.currentKhataMode.collectAsStateWithLifecycle()
     val currentAvatarIdx by viewModel.profileAvatarIndex.collectAsStateWithLifecycle()
     val profileCustomAvatarUri by viewModel.profileCustomAvatarUri.collectAsStateWithLifecycle()
+    val closedFolders by viewModel.closedFolders.collectAsStateWithLifecycle()
+    val isCurrentFolderClosed = remember(selectedFolder, closedFolders) {
+        selectedFolder != "সব ফোল্ডার" && viewModel.isFolderClosed(selectedFolder)
+    }
 
     // Screen controllers
     var activeSubScreen by rememberSaveable { mutableStateOf("HOME") }
@@ -2611,6 +2671,7 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
     var showIncomeTargetDialog by remember { mutableStateOf(false) }
     var showMonthlyHistoryDialog by remember { mutableStateOf(false) }
     var showFolderAllHistoryDialog by remember { mutableStateOf(false) }
+    var folderToDelete by remember { mutableStateOf<String?>(null) }
 
     // Calculator states
     var isCalculatorVisible by remember { mutableStateOf(false) }
@@ -2850,7 +2911,11 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
                             interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
                             indication = null
                         ) {
-                            showPremiumAddDialog = true
+                            if (isCurrentFolderClosed) {
+                                Toast.makeText(context, "‘$selectedFolder’ ফোল্ডারটি ‘Close and Paid’ সিলমোহর করা আছে! নতুন হিসাব যোগ করতে ড্রপডাউন থেকে সিলমোহর আনলক করুন।", Toast.LENGTH_LONG).show()
+                            } else {
+                                showPremiumAddDialog = true
+                            }
                         }
                         .drawBehind {
                             // Soft transparent green outer halo glow
@@ -2886,7 +2951,11 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
                             interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
                             indication = null
                         ) {
-                            showAddDialog = true
+                            if (isCurrentFolderClosed) {
+                                Toast.makeText(context, "‘$selectedFolder’ ফোল্ডারটি ‘Close and Paid’ সিলমোহর করা আছে! নতুন হিসাব যোগ করতে ড্রপডাউন থেকে সিলমোহর আনলক করুন।", Toast.LENGTH_LONG).show()
+                            } else {
+                                showAddDialog = true
+                            }
                         }
                         .background(
                             color = Color(0xFF10B981).copy(alpha = 0.25f), // transparent emerald green background
@@ -3018,12 +3087,20 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
                     isGlass = isGlass,
                     cardBorderColor = cardBorderColor,
                     onEdit = { item ->
-                        entryToEdit = item
-                        showAddDialog = true
+                        if (viewModel.isFolderClosed(item.folderName)) {
+                            Toast.makeText(context, "‘${item.folderName}’ ফোল্ডারটি ‘Close and Paid’ সিলমোহর করা আছে! হিসাব পরিবর্তন করতে সিলমোহর আনলক করুন।", Toast.LENGTH_LONG).show()
+                        } else {
+                            entryToEdit = item
+                            showAddDialog = true
+                        }
                     },
                     onDelete = { item ->
-                        viewModel.deleteEntry(item)
-                        Toast.makeText(context, "হিসাব ডিলিট করা হয়েছে", Toast.LENGTH_SHORT).show()
+                        if (viewModel.isFolderClosed(item.folderName)) {
+                            Toast.makeText(context, "‘${item.folderName}’ ফোল্ডারটি ‘Close and Paid’ সিলমোহর করা আছে! হিসাব মুছতে সিলমোহর আনলক করুন।", Toast.LENGTH_LONG).show()
+                        } else {
+                            viewModel.deleteEntry(item)
+                            Toast.makeText(context, "হিসাব ডিলিট করা হয়েছে", Toast.LENGTH_SHORT).show()
+                        }
                     },
                     isAltMode = (currentKhataMode == "ALT")
                 )
@@ -3318,12 +3395,36 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
                                     horizontalArrangement = Arrangement.SpaceBetween,
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Text(
-                                        text = "রিয়েল-টাইম সারাংশ",
-                                        fontSize = 15.sp,
-                                        fontWeight = FontWeight.ExtraBold,
-                                        color = Color.White
+                                    DynamicFolderHeaderDropdown(
+                                        selectedFolder = selectedFolder,
+                                        folders = folders,
+                                        entries = entries,
+                                        currentKhataMode = currentKhataMode,
+                                        accentColor = Color(0xFF818CF8),
+                                        containerColor = Color(0xFF312E81).copy(alpha = 0.45f),
+                                        borderColor = Color(0xFF818CF8).copy(alpha = 0.5f),
+                                        closedFolders = closedFolders,
+                                        onSelectFolder = { viewModel.selectFolder(it) },
+                                        onAddNewFolder = { showAddFolderDialog = true },
+                                        onDeleteFolder = { folderToDelete = it },
+                                        onToggleCloseAndPaid = { folder ->
+                                            viewModel.toggleCloseAndPaidFolder(folder)
+                                            val isNowClosed = viewModel.isFolderClosed(folder)
+                                            Toast.makeText(
+                                                context,
+                                                if (isNowClosed) "‘$folder’ ফোল্ডারটি ‘Close and Paid’ সিলমোহর করা হয়েছে!"
+                                                else "‘$folder’ ফোল্ডারটির ‘Close and Paid’ বন্ধ করা হয়েছে!",
+                                                Toast.LENGTH_SHORT
+                                            ).show()
+                                        }
                                     )
+
+                                    if (isCurrentFolderClosed) {
+                                        CloseAndPaidStamp(
+                                            monthText = selectedFolder,
+                                            modifier = Modifier.padding(end = 4.dp)
+                                        )
+                                    }
                                 }
 
                                 Row(
@@ -4356,96 +4457,6 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
                     }
                 }
 
-                // PREMIUM MODE FOLDERS SECTION
-                item {
-                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 4.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Row(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .clickable { showFoldersSection = !showFoldersSection },
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                Icon(
-                                    Icons.Default.Folder,
-                                    contentDescription = null,
-                                    tint = Color(0xFF818CF8),
-                                    modifier = Modifier.size(18.dp)
-                                )
-                                Text(
-                                    text = if (!showFoldersSection) "হিসাব খাতা: $selectedFolder" else "হিসাব খাতা / ফোল্ডারসমূহ",
-                                    fontSize = 14.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = Color.White
-                                )
-                                Spacer(modifier = Modifier.width(2.dp))
-                                Icon(
-                                    imageVector = if (showFoldersSection) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
-                                    contentDescription = "ফোল্ডারসমূহ দেখান বা লুকান",
-                                    tint = Color(0xFF94A3B8),
-                                    modifier = Modifier.size(18.dp)
-                                )
-                            }
-
-                            // + নতুন ফোল্ডার Button
-                            IconButton(
-                                onClick = { showAddFolderDialog = true },
-                                modifier = Modifier
-                                    .size(28.dp)
-                                    .background(Color(0xFF312E81).copy(alpha = 0.4f), RoundedCornerShape(12.dp))
-                            ) {
-                                Icon(
-                                    Icons.Default.Add,
-                                    contentDescription = "নতুন ফোল্ডার",
-                                    tint = Color(0xFF818CF8),
-                                    modifier = Modifier.size(16.dp)
-                                )
-                            }
-                        }
-
-                        // Horizontal scroll list of folder pills
-                        if (showFoldersSection) {
-                            LazyRow(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 4.dp),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                item {
-                                    CustomFolderPill(
-                                        label = "সব হিসাব",
-                                        isSelected = selectedFolder == "সব ফোল্ডার",
-                                        leadingIcon = Icons.Default.List,
-                                        onClick = { viewModel.selectFolder("সব ফোল্ডার") }
-                                    )
-                                }
-
-                                items(folders) { folder ->
-                                    CustomFolderPill(
-                                        label = folder,
-                                        isSelected = selectedFolder == folder,
-                                        leadingIcon = Icons.Default.Folder,
-                                        showDelete = (folder != "আয় খাতা" && folder != "ব্যয় খাতা" && folders.size > 1),
-                                        onClick = { viewModel.selectFolder(folder) },
-                                        onDeleteClick = {
-                                            viewModel.deleteFolder(folder)
-                                            Toast.makeText(context, "ফোল্ডার এবং হিসাব মুছে ফেলা হয়েছে", Toast.LENGTH_SHORT).show()
-                                        }
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-
                     // 5. HISTORY LOG HEADER
                     item {
                         Row(
@@ -4584,14 +4595,18 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
                                     ) {
                                         IconButton(
                                             onClick = {
-                                                premiumEditDayDialogData = PremiumDayEditData(
-                                                    dateMillis = day.dateMillis,
-                                                    income = day.totalIncome,
-                                                    nasta = day.nasta,
-                                                    bhat = day.bhat,
-                                                    gariBhara = day.gariBhara,
-                                                    onnano = day.onnano
-                                                )
+                                                if (isCurrentFolderClosed) {
+                                                    Toast.makeText(context, "‘$selectedFolder’ ফোল্ডারটি ‘Close and Paid’ সিলমোহর করা আছে! হিসাব পরিবর্তন করতে সিলমোহর আনলক করুন।", Toast.LENGTH_LONG).show()
+                                                } else {
+                                                    premiumEditDayDialogData = PremiumDayEditData(
+                                                        dateMillis = day.dateMillis,
+                                                        income = day.totalIncome,
+                                                        nasta = day.nasta,
+                                                        bhat = day.bhat,
+                                                        gariBhara = day.gariBhara,
+                                                        onnano = day.onnano
+                                                    )
+                                                }
                                             },
                                             modifier = Modifier
                                                 .background(Color(0xFF818CF8).copy(alpha = 0.1f), CircleShape)
@@ -4602,7 +4617,11 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
 
                                         IconButton(
                                             onClick = {
-                                                premiumDayToDeleteMillis = day.dateMillis
+                                                if (isCurrentFolderClosed) {
+                                                    Toast.makeText(context, "‘$selectedFolder’ ফোল্ডারটি ‘Close and Paid’ সিলমোহর করা আছে! হিসাব মুছতে সিলমোহর আনলক করুন।", Toast.LENGTH_LONG).show()
+                                                } else {
+                                                    premiumDayToDeleteMillis = day.dateMillis
+                                                }
                                             },
                                             modifier = Modifier
                                                 .background(Color(0xFFEF4444).copy(alpha = 0.1f), CircleShape)
@@ -4648,34 +4667,42 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
                             border = BorderStroke(1.5.dp, Color(0xFF2563EB).copy(alpha = 0.5f))
                         ) {
                             Column(modifier = Modifier.padding(16.dp)) {
-                                // Dashboard Title Row
+                                // Dashboard Title Row - Active Folder Selector
                                 Row(
-                                    modifier = Modifier.fillMaxWidth(),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(bottom = 12.dp),
                                     horizontalArrangement = Arrangement.SpaceBetween,
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                    ) {
-                                        Box(
-                                            modifier = Modifier
-                                                .size(24.dp)
-                                                .background(Color(0xFFFBBF24).copy(alpha = 0.15f), CircleShape),
-                                            contentAlignment = Alignment.Center
-                                        ) {
-                                            Icon(
-                                                imageVector = Icons.Default.Dashboard,
-                                                contentDescription = null,
-                                                tint = Color(0xFFFBBF24),
-                                                modifier = Modifier.size(14.dp)
-                                            )
+                                    DynamicFolderHeaderDropdown(
+                                        selectedFolder = selectedFolder,
+                                        folders = folders,
+                                        entries = entries,
+                                        currentKhataMode = currentKhataMode,
+                                        accentColor = Color(0xFFFBBF24),
+                                        containerColor = Color(0xFF1E293B).copy(alpha = 0.85f),
+                                        borderColor = Color(0xFFFBBF24).copy(alpha = 0.5f),
+                                        closedFolders = closedFolders,
+                                        onSelectFolder = { viewModel.selectFolder(it) },
+                                        onAddNewFolder = { showAddFolderDialog = true },
+                                        onDeleteFolder = { folderToDelete = it },
+                                        onToggleCloseAndPaid = { folder ->
+                                            viewModel.toggleCloseAndPaidFolder(folder)
+                                            val isNowClosed = viewModel.isFolderClosed(folder)
+                                            Toast.makeText(
+                                                context,
+                                                if (isNowClosed) "‘$folder’ ফোল্ডারটি ‘Close and Paid’ সিলমোহর করা হয়েছে!"
+                                                else "‘$folder’ ফোল্ডারটির ‘Close and Paid’ বন্ধ করা হয়েছে!",
+                                                Toast.LENGTH_SHORT
+                                            ).show()
                                         }
-                                        Text(
-                                            text = "ড্যাশবোর্ড",
-                                            fontSize = 15.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = Color.White
+                                    )
+
+                                    if (isCurrentFolderClosed) {
+                                        CloseAndPaidStamp(
+                                            monthText = selectedFolder,
+                                            modifier = Modifier.padding(end = 4.dp)
                                         )
                                     }
                                 }
@@ -4868,29 +4895,39 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
                             Column(modifier = Modifier.padding(18.dp)) {
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    // Icon inside square rounded box
-                                    Box(
-                                        modifier = Modifier
-                                            .size(34.dp)
-                                            .background(Color(0xFF3B82F6).copy(alpha = 0.2f), RoundedCornerShape(8.dp)),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Icon(
-                                            Icons.Default.BarChart,
-                                            contentDescription = null,
-                                            tint = Color(0xFF60A5FA),
-                                            modifier = Modifier.size(18.dp)
+                                    DynamicFolderHeaderDropdown(
+                                        selectedFolder = selectedFolder,
+                                        folders = folders,
+                                        entries = entries,
+                                        currentKhataMode = currentKhataMode,
+                                        accentColor = Color(0xFF60A5FA),
+                                        containerColor = Color(0xFF1E3A8A).copy(alpha = 0.4f),
+                                        borderColor = Color(0xFF3B82F6).copy(alpha = 0.5f),
+                                        closedFolders = closedFolders,
+                                        onSelectFolder = { viewModel.selectFolder(it) },
+                                        onAddNewFolder = { showAddFolderDialog = true },
+                                        onDeleteFolder = { folderToDelete = it },
+                                        onToggleCloseAndPaid = { folder ->
+                                            viewModel.toggleCloseAndPaidFolder(folder)
+                                            val isNowClosed = viewModel.isFolderClosed(folder)
+                                            Toast.makeText(
+                                                context,
+                                                if (isNowClosed) "‘$folder’ ফোল্ডারটি ‘Close and Paid’ সিলমোহর করা হয়েছে!"
+                                                else "‘$folder’ ফোল্ডারটির ‘Close and Paid’ বন্ধ করা হয়েছে!",
+                                                Toast.LENGTH_SHORT
+                                            ).show()
+                                        }
+                                    )
+
+                                    if (isCurrentFolderClosed) {
+                                        CloseAndPaidStamp(
+                                            monthText = selectedFolder,
+                                            modifier = Modifier.padding(end = 4.dp)
                                         )
                                     }
-                                    Spacer(modifier = Modifier.width(10.dp))
-                                    Text(
-                                        text = "মোট হিসাবসমূহ",
-                                        fontSize = 15.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = Color.White
-                                    )
                                 }
 
                                 Spacer(modifier = Modifier.height(14.dp))
@@ -5783,105 +5820,6 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
                 }
                 }
 
-                // 3. FOLDERS / SESSIONS HEADER & Horizontal list
-                item {
-                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 4.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Row(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .clickable { showFoldersSection = !showFoldersSection },
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                Icon(
-                                    Icons.Default.Folder,
-                                    contentDescription = null,
-                                    tint = Color(0xFF60A5FA),
-                                    modifier = Modifier.size(18.dp)
-                                )
-                                Text(
-                                    text = if (!showFoldersSection) "হিসাব খাতা: $selectedFolder" else "হিসাব খাতা / ফোল্ডারসমূহ",
-                                    fontSize = 14.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = Color.White
-                                )
-                                Spacer(modifier = Modifier.width(2.dp))
-                                Icon(
-                                    imageVector = if (showFoldersSection) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
-                                    contentDescription = "ফোল্ডারসমূহ দেখান বা লুকান",
-                                    tint = Color(0xFF94A3B8),
-                                    modifier = Modifier.size(18.dp)
-                                )
-                            }
-
-                            // + নতুন ফোল্ডার Button matching screenshot
-                            IconButton(
-                                onClick = { showAddFolderDialog = true },
-                                modifier = Modifier
-                                    .size(28.dp)
-                                    .background(Color(0xFF1E3A8A).copy(alpha = 0.25f), RoundedCornerShape(12.dp))
-                            ) {
-                                Icon(
-                                    Icons.Default.Add,
-                                    contentDescription = "নতুন ফোল্ডার",
-                                    tint = Color(0xFF60A5FA),
-                                    modifier = Modifier.size(16.dp)
-                                )
-                            }
-                        }
-
-                        // Horizontal scroll list of folder pills matching screenshot
-                        if (showFoldersSection) {
-                            LazyRow(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 4.dp),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                item {
-                                    CustomFolderPill(
-                                        label = "সব হিসাব",
-                                        isSelected = selectedFolder == "সব ফোল্ডার",
-                                        leadingIcon = Icons.Default.List,
-                                        onClick = { viewModel.selectFolder("সব ফোল্ডার") }
-                                    )
-                                }
-
-                                item {
-                                    CustomFolderPill(
-                                        label = "সাধারণ হিসাব",
-                                        isSelected = selectedFolder == "সাধারণ হিসাব",
-                                        leadingIcon = Icons.Default.Folder,
-                                        onClick = { viewModel.selectFolder("সাধারণ হিসাব") }
-                                    )
-                                }
-
-                                items(folders.filter { it != "সাধারণ হিসাব" }) { folder ->
-                                    CustomFolderPill(
-                                        label = folder,
-                                        isSelected = selectedFolder == folder,
-                                        leadingIcon = Icons.Default.Folder,
-                                        showDelete = true,
-                                        onClick = { viewModel.selectFolder(folder) },
-                                        onDeleteClick = {
-                                            viewModel.deleteFolder(folder)
-                                            Toast.makeText(context, "ফোল্ডার এবং হিসাব মুছে ফেলা হয়েছে", Toast.LENGTH_SHORT).show()
-                                        }
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-
                 // 4. INCOME-EXPENSE TREND CHART (COLLAPSIBLE)
                 item {
                     Column {
@@ -6120,12 +6058,20 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
                                 entry = item,
                                 wageRate = wageRate,
                                 onEdit = {
-                                    entryToEdit = item
-                                    showAddDialog = true
+                                    if (viewModel.isFolderClosed(item.folderName)) {
+                                        Toast.makeText(context, "‘${item.folderName}’ ফোল্ডারটি ‘Close and Paid’ সিলমোহর করা আছে! হিসাব পরিবর্তন করতে সিলমোহর আনলক করুন।", Toast.LENGTH_LONG).show()
+                                    } else {
+                                        entryToEdit = item
+                                        showAddDialog = true
+                                    }
                                 },
                                 onDelete = {
-                                    viewModel.deleteEntry(item)
-                                    Toast.makeText(context, "হিসাব ডিলিট করা হয়েছে", Toast.LENGTH_SHORT).show()
+                                    if (viewModel.isFolderClosed(item.folderName)) {
+                                        Toast.makeText(context, "‘${item.folderName}’ ফোল্ডারটি ‘Close and Paid’ সিলমোহর করা আছে! হিসাব মুছতে সিলমোহর আনলক করুন।", Toast.LENGTH_LONG).show()
+                                    } else {
+                                        viewModel.deleteEntry(item)
+                                        Toast.makeText(context, "হিসাব ডিলিট করা হয়েছে", Toast.LENGTH_SHORT).show()
+                                    }
                                 },
                                 cardBgColor = cardBgColor,
                                 isGlass = isGlass,
@@ -6143,6 +6089,157 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
 
     // --- DIALOGS CONTROLLERS ---
 
+    // 0. FOLDER DELETE CONFIRMATION DIALOG (SAFETY FIRST)
+    if (folderToDelete != null) {
+        val targetFolder = folderToDelete!!
+        val affectedEntriesCount = remember(targetFolder, entries, currentKhataMode) {
+            when (currentKhataMode) {
+                "ALT" -> entries.count { it.folderName == "★ $targetFolder" || it.folderName == targetFolder }
+                "PREMIUM" -> entries.count { it.folderName == "✦ $targetFolder" || it.folderName == targetFolder }
+                else -> entries.count { it.folderName == targetFolder }
+            }
+        }
+
+        var deleteCountdown by remember(targetFolder) { mutableStateOf(5) }
+
+        LaunchedEffect(targetFolder) {
+            deleteCountdown = 5
+            while (deleteCountdown > 0) {
+                kotlinx.coroutines.delay(1000L)
+                deleteCountdown--
+            }
+        }
+
+        AlertDialog(
+            onDismissRequest = { folderToDelete = null },
+            containerColor = Color(0xFF0F172A),
+            shape = RoundedCornerShape(20.dp),
+            title = {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(38.dp)
+                            .background(Color(0xFFEF4444).copy(alpha = 0.2f), RoundedCornerShape(10.dp)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Warning,
+                            contentDescription = null,
+                            tint = Color(0xFFEF4444),
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+                    Column {
+                        Text(
+                            text = "ফোল্ডার ডিলিট নিশ্চিতকরণ",
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White
+                        )
+                        Text(
+                            text = "স্থায়ীভাবে মুছে ফেলা হবে",
+                            fontSize = 11.sp,
+                            color = Color(0xFFF87171)
+                        )
+                    }
+                }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(
+                        text = "আপনি কি নিশ্চিত যে আপনি '$targetFolder' ফোল্ডারটি মুছে ফেলতে চান?",
+                        fontSize = 13.5.sp,
+                        color = Color(0xFFE2E8F0),
+                        lineHeight = 19.sp
+                    )
+
+                    Card(
+                        colors = CardDefaults.cardColors(
+                            containerColor = if (affectedEntriesCount > 0) Color(0xFF450A0A).copy(alpha = 0.6f) else Color(0xFF1E293B)
+                        ),
+                        shape = RoundedCornerShape(10.dp),
+                        border = BorderStroke(
+                            1.dp,
+                            if (affectedEntriesCount > 0) Color(0xFFEF4444).copy(alpha = 0.5f) else Color.White.copy(alpha = 0.1f)
+                        )
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(10.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = if (affectedEntriesCount > 0) Icons.Default.DeleteForever else Icons.Default.Info,
+                                contentDescription = null,
+                                tint = if (affectedEntriesCount > 0) Color(0xFFFCA5A5) else Color(0xFF94A3B8),
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Column {
+                                if (affectedEntriesCount > 0) {
+                                    Text(
+                                        text = "এই ফোল্ডারে থাকা মোট ${affectedEntriesCount.toBangla()} টি হিসাবের রেকর্ড চিরতরে মুছে যাবে!",
+                                        fontSize = 11.5.sp,
+                                        color = Color(0xFFFCA5A5),
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Text(
+                                        text = "ডিলিট করার পর এই ডেটা আর পুনরুদ্ধার করা যাবে না।",
+                                        fontSize = 10.5.sp,
+                                        color = Color(0xFFE2E8F0).copy(alpha = 0.8f)
+                                    )
+                                } else {
+                                    Text(
+                                        text = "এই ফোল্ডারে বর্তমানে কোনো হিসাবের রেকর্ড নেই।",
+                                        fontSize = 11.5.sp,
+                                        color = Color(0xFF94A3B8)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val folder = targetFolder
+                        folderToDelete = null
+                        viewModel.deleteFolder(folder)
+                        Toast.makeText(context, "'$folder' ফোল্ডার সফলভাবে মুছে ফেলা হয়েছে", Toast.LENGTH_SHORT).show()
+                    },
+                    enabled = deleteCountdown <= 0,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color(0xFFEF4444),
+                        disabledContainerColor = Color(0xFFEF4444).copy(alpha = 0.35f),
+                        disabledContentColor = Color.White.copy(alpha = 0.5f)
+                    ),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Text(
+                        text = if (deleteCountdown > 0) "হ্যাঁ, মুছে ফেলুন (${deleteCountdown.toBangla()} সে.)" else "হ্যাঁ, মুছে ফেলুন",
+                        color = if (deleteCountdown <= 0) Color.White else Color.White.copy(alpha = 0.7f),
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 12.sp
+                    )
+                }
+            },
+            dismissButton = {
+                OutlinedButton(
+                    onClick = { folderToDelete = null },
+                    shape = RoundedCornerShape(10.dp),
+                    border = BorderStroke(1.dp, Color.White.copy(alpha = 0.2f))
+                ) {
+                    Text("বাতিল", color = Color(0xFFCBD5E1), fontSize = 12.sp)
+                }
+            }
+        )
+    }
+
     if (showFolderAllHistoryDialog) {
         FolderAllHistoryDialog(
             folderName = selectedFolder,
@@ -6151,13 +6248,21 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
             wageRate = wageRate,
             onDismiss = { showFolderAllHistoryDialog = false },
             onEditEntry = { item ->
-                entryToEdit = item
-                showAddDialog = true
-                showFolderAllHistoryDialog = false
+                if (viewModel.isFolderClosed(item.folderName)) {
+                    Toast.makeText(context, "‘${item.folderName}’ ফোল্ডারটি ‘Close and Paid’ সিলমোহর করা আছে! হিসাব পরিবর্তন করতে সিলমোহর আনলক করুন।", Toast.LENGTH_LONG).show()
+                } else {
+                    entryToEdit = item
+                    showAddDialog = true
+                    showFolderAllHistoryDialog = false
+                }
             },
             onDeleteEntry = { item ->
-                viewModel.deleteEntry(item)
-                Toast.makeText(context, "হিসাব ডিলিট করা হয়েছে", Toast.LENGTH_SHORT).show()
+                if (viewModel.isFolderClosed(item.folderName)) {
+                    Toast.makeText(context, "‘${item.folderName}’ ফোল্ডারটি ‘Close and Paid’ সিলমোহর করা আছে! হিসাব মুছতে সিলমোহর আনলক করুন।", Toast.LENGTH_LONG).show()
+                } else {
+                    viewModel.deleteEntry(item)
+                    Toast.makeText(context, "হিসাব ডিলিট করা হয়েছে", Toast.LENGTH_SHORT).show()
+                }
             }
         )
     }
@@ -8704,6 +8809,424 @@ fun DashboardAvgPillItem(
 }
 
 @Composable
+fun CloseAndPaidStamp(
+    modifier: Modifier = Modifier,
+    monthText: String = ""
+) {
+    val displayMonth = remember(monthText) {
+        val clean = monthText.removePrefix("★ ").removePrefix("✦ ").trim()
+        if (clean.isNotBlank() && clean != "সব ফোল্ডার") {
+            clean.uppercase()
+        } else {
+            val sdf = SimpleDateFormat("MMMM yyyy", Locale.US)
+            sdf.format(Date()).uppercase()
+        }
+    }
+
+    Box(
+        modifier = modifier
+            .rotate(-10f)
+            .size(72.dp)
+            .drawBehind {
+                val strokeWidth = 1.6.dp.toPx()
+                val radius = size.minDimension / 2f - strokeWidth
+                // Outer circle
+                drawCircle(
+                    color = Color(0xFF60A5FA).copy(alpha = 0.85f),
+                    radius = radius,
+                    style = androidx.compose.ui.graphics.drawscope.Stroke(
+                        width = strokeWidth
+                    )
+                )
+                // Inner circle
+                drawCircle(
+                    color = Color(0xFF60A5FA).copy(alpha = 0.55f),
+                    radius = radius - 3.5.dp.toPx(),
+                    style = androidx.compose.ui.graphics.drawscope.Stroke(
+                        width = 1.dp.toPx()
+                    )
+                )
+            },
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+            modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+        ) {
+            Text(
+                text = "CLOSE AND PAID",
+                fontSize = 6.2.sp,
+                fontWeight = FontWeight.Black,
+                color = Color(0xFF93C5FD),
+                letterSpacing = 0.5.sp,
+                textAlign = TextAlign.Center,
+                lineHeight = 7.sp
+            )
+
+            Spacer(modifier = Modifier.height(1.dp))
+
+            Icon(
+                imageVector = Icons.Default.Check,
+                contentDescription = "Close and Paid Seal",
+                tint = Color(0xFF93C5FD),
+                modifier = Modifier.size(20.dp)
+            )
+
+            Spacer(modifier = Modifier.height(1.dp))
+
+            Text(
+                text = displayMonth,
+                fontSize = 5.8.sp,
+                fontWeight = FontWeight.ExtraBold,
+                color = Color(0xFF93C5FD).copy(alpha = 0.95f),
+                letterSpacing = 0.4.sp,
+                textAlign = TextAlign.Center,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+@Composable
+fun DynamicFolderHeaderDropdown(
+    selectedFolder: String,
+    folders: List<String>,
+    entries: List<DailyEntry>,
+    currentKhataMode: String,
+    accentColor: Color,
+    containerColor: Color,
+    borderColor: Color,
+    closedFolders: Set<String>,
+    onSelectFolder: (String) -> Unit,
+    onAddNewFolder: () -> Unit,
+    onDeleteFolder: (String) -> Unit,
+    onToggleCloseAndPaid: (String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var isExpanded by remember { mutableStateOf(false) }
+    val isCurrentClosed = remember(selectedFolder, closedFolders) {
+        if (selectedFolder == "সব ফোল্ডার") false
+        else {
+            val clean = selectedFolder.removePrefix("★ ").removePrefix("✦ ").trim()
+            closedFolders.contains(selectedFolder) || closedFolders.contains(clean) ||
+                    closedFolders.contains("★ $clean") || closedFolders.contains("✦ $clean")
+        }
+    }
+
+    Box(modifier = modifier) {
+        Surface(
+            onClick = { isExpanded = !isExpanded },
+            shape = RoundedCornerShape(12.dp),
+            color = containerColor,
+            border = BorderStroke(1.dp, if (isCurrentClosed) Color(0xFF10B981).copy(alpha = 0.6f) else borderColor)
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(26.dp)
+                        .background(if (isCurrentClosed) Color(0xFF10B981).copy(alpha = 0.25f) else accentColor.copy(alpha = 0.25f), CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = if (isCurrentClosed) Icons.Default.Verified
+                                      else if (selectedFolder == "সব ফোল্ডার") Icons.Default.FolderSpecial
+                                      else Icons.Default.Folder,
+                        contentDescription = null,
+                        tint = if (isCurrentClosed) Color(0xFF34D399) else accentColor,
+                        modifier = Modifier.size(15.dp)
+                    )
+                }
+                Column {
+                    Text(
+                        text = selectedFolder,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    if (isCurrentClosed) {
+                        Text(
+                            text = "🔒 CLOSE & PAID",
+                            fontSize = 8.5.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = Color(0xFF34D399)
+                        )
+                    }
+                }
+                Icon(
+                    imageVector = if (isExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                    contentDescription = "ফোল্ডার নির্বাচন ড্রপডাউন",
+                    tint = if (isCurrentClosed) Color(0xFF34D399) else accentColor.copy(alpha = 0.9f),
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+        }
+
+        DropdownMenu(
+            expanded = isExpanded,
+            onDismissRequest = { isExpanded = false },
+            modifier = Modifier
+                .widthIn(min = 270.dp, max = 350.dp)
+                .background(Color(0xFF0F172A), RoundedCornerShape(16.dp))
+                .border(1.dp, accentColor.copy(alpha = 0.4f), RoundedCornerShape(16.dp))
+        ) {
+            // 1. + নতুন খাতা / ফোল্ডার তৈরি করুন
+            DropdownMenuItem(
+                text = {
+                    Column {
+                        Text(
+                            text = "+ নতুন খাতা / ফোল্ডার তৈরি করুন",
+                            fontSize = 13.5.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = accentColor
+                        )
+                        Text(
+                            text = "নতুন ক্যাটাগরি বা প্রজেক্ট যোগ করুন",
+                            fontSize = 10.5.sp,
+                            color = Color(0xFF94A3B8)
+                        )
+                    }
+                },
+                leadingIcon = {
+                    Box(
+                        modifier = Modifier
+                            .size(28.dp)
+                            .background(accentColor.copy(alpha = 0.2f), CircleShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Add,
+                            contentDescription = "নতুন ফোল্ডার",
+                            tint = accentColor,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                },
+                onClick = {
+                    isExpanded = false
+                    onAddNewFolder()
+                },
+                modifier = Modifier.padding(horizontal = 4.dp)
+            )
+
+            HorizontalDivider(
+                color = Color.White.copy(alpha = 0.12f),
+                modifier = Modifier.padding(vertical = 4.dp, horizontal = 8.dp)
+            )
+
+            // 2. সব ফোল্ডার (সকল হিসাব)
+            val isAllSelected = selectedFolder == "সব ফোল্ডার"
+            DropdownMenuItem(
+                text = {
+                    Column {
+                        Text(
+                            text = "সব ফোল্ডার (সকল হিসাব)",
+                            fontSize = 13.5.sp,
+                            fontWeight = if (isAllSelected) FontWeight.Bold else FontWeight.Medium,
+                            color = if (isAllSelected) Color.White else Color(0xFFCBD5E1)
+                        )
+                        Text(
+                            text = "মোট ${entries.size.toBangla()} টি হিসাব",
+                            fontSize = 10.5.sp,
+                            color = if (isAllSelected) accentColor else Color(0xFF64748B)
+                        )
+                    }
+                },
+                leadingIcon = {
+                    Box(
+                        modifier = Modifier
+                            .size(28.dp)
+                            .background(
+                                if (isAllSelected) accentColor.copy(alpha = 0.25f) else Color.White.copy(alpha = 0.08f),
+                                CircleShape
+                            ),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.FolderSpecial,
+                            contentDescription = null,
+                            tint = if (isAllSelected) accentColor else Color(0xFF94A3B8),
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                },
+                trailingIcon = {
+                    if (isAllSelected) {
+                        Icon(
+                            imageVector = Icons.Default.CheckCircle,
+                            contentDescription = "নির্বাচিত",
+                            tint = accentColor,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                },
+                onClick = {
+                    onSelectFolder("সব ফোল্ডার")
+                    isExpanded = false
+                },
+                modifier = Modifier
+                    .padding(horizontal = 4.dp)
+                    .background(
+                        if (isAllSelected) accentColor.copy(alpha = 0.12f) else Color.Transparent,
+                        RoundedCornerShape(8.dp)
+                    )
+            )
+
+            // 3. Individual Folders
+            folders.forEach { folder ->
+                val isSelected = selectedFolder == folder
+                val cleanFolder = folder.removePrefix("★ ").removePrefix("✦ ").trim()
+                val isClosed = closedFolders.contains(folder) || closedFolders.contains(cleanFolder) ||
+                        closedFolders.contains("★ $cleanFolder") || closedFolders.contains("✦ $cleanFolder")
+
+                val folderCount = remember(folder, entries, currentKhataMode) {
+                    when (currentKhataMode) {
+                        "ALT" -> entries.count { it.folderName == "★ $folder" || it.folderName == folder }
+                        "PREMIUM" -> entries.count { it.folderName == "✦ $folder" || it.folderName == folder }
+                        else -> entries.count { it.folderName == folder }
+                    }
+                }
+                val canDelete = when (currentKhataMode) {
+                    "PREMIUM" -> folder != "আয় খাতা" && folder != "ব্যয় খাতা" && folders.size > 1
+                    else -> folders.size > 1
+                }
+
+                DropdownMenuItem(
+                    text = {
+                        Column {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Text(
+                                    text = folder,
+                                    fontSize = 13.5.sp,
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                    color = if (isSelected) Color.White else Color(0xFFCBD5E1),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                if (isClosed) {
+                                    Surface(
+                                        color = Color(0xFF10B981).copy(alpha = 0.2f),
+                                        shape = RoundedCornerShape(4.dp),
+                                        border = BorderStroke(1.dp, Color(0xFF10B981).copy(alpha = 0.4f))
+                                    ) {
+                                        Text(
+                                            text = "পেইড",
+                                            fontSize = 8.5.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color(0xFF34D399),
+                                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                        )
+                                    }
+                                }
+                            }
+                            Text(
+                                text = "${folderCount.toBangla()} টি হিসাব" + if (isClosed) " (লকড)" else "",
+                                fontSize = 10.5.sp,
+                                color = if (isClosed) Color(0xFF34D399) else if (isSelected) accentColor else Color(0xFF64748B)
+                            )
+                        }
+                    },
+                    leadingIcon = {
+                        Box(
+                            modifier = Modifier
+                                .size(28.dp)
+                                .background(
+                                    if (isClosed) Color(0xFF10B981).copy(alpha = 0.25f)
+                                    else if (isSelected) accentColor.copy(alpha = 0.25f)
+                                    else Color.White.copy(alpha = 0.08f),
+                                    CircleShape
+                                ),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = if (isClosed) Icons.Default.Verified else Icons.Default.Folder,
+                                contentDescription = null,
+                                tint = if (isClosed) Color(0xFF34D399) else if (isSelected) accentColor else Color(0xFF94A3B8),
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                    },
+                    trailingIcon = {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            if (isSelected) {
+                                Icon(
+                                    imageVector = Icons.Default.CheckCircle,
+                                    contentDescription = "নির্বাচিত",
+                                    tint = accentColor,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+
+                            // Close & Paid Button Toggle
+                            IconButton(
+                                onClick = {
+                                    onToggleCloseAndPaid(folder)
+                                },
+                                modifier = Modifier
+                                    .size(28.dp)
+                                    .background(
+                                        if (isClosed) Color(0xFF10B981).copy(alpha = 0.25f) else Color.White.copy(alpha = 0.08f),
+                                        CircleShape
+                                    )
+                            ) {
+                                Icon(
+                                    imageVector = if (isClosed) Icons.Default.Verified else Icons.Default.LockOpen,
+                                    contentDescription = if (isClosed) "Close and Paid বন্ধ করুন" else "Close and Paid করুন",
+                                    tint = if (isClosed) Color(0xFF34D399) else Color(0xFF94A3B8),
+                                    modifier = Modifier.size(15.dp)
+                                )
+                            }
+
+                            if (canDelete) {
+                                IconButton(
+                                    onClick = {
+                                        isExpanded = false
+                                        onDeleteFolder(folder)
+                                    },
+                                    modifier = Modifier
+                                        .size(28.dp)
+                                        .background(Color(0xFFEF4444).copy(alpha = 0.15f), CircleShape)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.DeleteOutline,
+                                        contentDescription = "ডিলিট করুন",
+                                        tint = Color(0xFFF87171),
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                }
+                            }
+                        }
+                    },
+                    onClick = {
+                        onSelectFolder(folder)
+                        isExpanded = false
+                    },
+                    modifier = Modifier
+                        .padding(horizontal = 4.dp)
+                        .background(
+                            if (isSelected) accentColor.copy(alpha = 0.12f) else Color.Transparent,
+                            RoundedCornerShape(8.dp)
+                        )
+                )
+            }
+        }
+    }
+}
+
+@Composable
 fun CustomFolderPill(
     label: String,
     isSelected: Boolean,
@@ -8739,15 +9262,22 @@ fun CustomFolderPill(
                 color = if (isSelected) Color.White else Color(0xFFCBD5E1)
             )
             if (showDelete) {
-                Spacer(modifier = Modifier.width(2.dp))
-                Icon(
-                    Icons.Default.Delete,
-                    contentDescription = "মুছুন",
-                    tint = if (isSelected) Color.White.copy(alpha = 0.7f) else Color(0xFFEF4444).copy(alpha = 0.7f),
+                Spacer(modifier = Modifier.width(3.dp))
+                Box(
                     modifier = Modifier
-                        .size(13.dp)
-                        .clickable { onDeleteClick() }
-                )
+                        .size(20.dp)
+                        .clip(CircleShape)
+                        .background(if (isSelected) Color.White.copy(alpha = 0.18f) else Color(0xFFEF4444).copy(alpha = 0.12f))
+                        .clickable { onDeleteClick() },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        Icons.Default.Delete,
+                        contentDescription = "মুছুন",
+                        tint = if (isSelected) Color.White else Color(0xFFEF4444),
+                        modifier = Modifier.size(12.dp)
+                    )
+                }
             }
         }
     }
