@@ -226,6 +226,31 @@ class MainViewModel(private val repository: DailyEntryRepository, private val co
     val profileAvatarIndex = MutableStateFlow(prefs.getInt("PROFILE_AVATAR_INDEX", 0))
     val profileCustomAvatarUri = MutableStateFlow(prefs.getString("PROFILE_CUSTOM_AVATAR_URI", "") ?: "")
 
+    // Viewers Mode State & App Password
+    val isViewerMode = MutableStateFlow(prefs.getBoolean("IS_VIEWER_MODE", false))
+    val savedUserPassword = MutableStateFlow(prefs.getString("CLOUD_USER_PASSWORD", "") ?: "")
+
+    fun setViewerMode(enabled: Boolean) {
+        isViewerMode.value = enabled
+        prefs.edit().putBoolean("IS_VIEWER_MODE", enabled).commit()
+    }
+
+    fun saveUserPassword(password: String) {
+        savedUserPassword.value = password
+        prefs.edit().putString("CLOUD_USER_PASSWORD", password).commit()
+    }
+
+    fun verifyPassword(input: String): Boolean {
+        val trimmed = input.trim()
+        if (trimmed.isBlank()) return false
+        val saved = savedUserPassword.value.trim()
+        if (saved.isBlank()) {
+            saveUserPassword(trimmed)
+            return true
+        }
+        return saved == trimmed
+    }
+
     val firebaseDbUrl = MutableStateFlow(
         prefs.getString("FIREBASE_DB_URL", "https://smart-manager-d02fb-default-rtdb.firebaseio.com/")?.let {
             if (it == "https://takahishab-default-rtdb.firebaseio.com/" || it == "https://takahishab-default-rtdb.firebaseio.com") {
@@ -1527,6 +1552,7 @@ class MainViewModel(private val repository: DailyEntryRepository, private val co
                                 client.newCall(regRequest).execute().use { regResponse ->
                                     if (regResponse.isSuccessful) {
                                         withContext(Dispatchers.Main) {
+                                            saveUserPassword(password)
                                             setGoogleSignIn(email, name, true)
                                         }
                                         val backupContent = exportBackup()
@@ -1563,6 +1589,7 @@ class MainViewModel(private val repository: DailyEntryRepository, private val co
                                 if (storedPassword == password) {
                                     val displayName = profileObj.optString("name", name)
                                     withContext(Dispatchers.Main) {
+                                        saveUserPassword(password)
                                         setGoogleSignIn(email, displayName, true)
                                     }
                                     val backupUrl = firebaseDbUrl.value + "users/" + userId + "/backup.json"
@@ -1660,11 +1687,13 @@ class MainViewModel(private val repository: DailyEntryRepository, private val co
     }
 
     fun updateProfileName(name: String) {
+        if (isViewerMode.value) return
         profileName.value = name
         prefs.edit().putString("PROFILE_NAME", name).apply()
     }
 
     fun updateProfileAvatarIndex(index: Int) {
+        if (isViewerMode.value) return
         profileAvatarIndex.value = index
         // When setting standard avatar, clear custom URI
         profileCustomAvatarUri.value = ""
@@ -1672,11 +1701,13 @@ class MainViewModel(private val repository: DailyEntryRepository, private val co
     }
 
     fun updateProfileCustomAvatarUri(uriString: String) {
+        if (isViewerMode.value) return
         profileCustomAvatarUri.value = uriString
         prefs.edit().putString("PROFILE_CUSTOM_AVATAR_URI", uriString).apply()
     }
 
     fun setGoogleSignIn(email: String, name: String, signedIn: Boolean) {
+        if (!signedIn && isViewerMode.value) return
         isGoogleSignedIn.value = signedIn
         googleEmail.value = email
         googleName.value = name
@@ -1904,6 +1935,9 @@ class MainViewModel(private val repository: DailyEntryRepository, private val co
     }
 
     fun savePremiumDayData(dateMillis: Long, income: Double, nasta: Double, bhat: Double, gariBhara: Double, onnano: Double, folderName: String) {
+        if (isViewerMode.value) return
+        val folderWithDiamond = if (folderName.startsWith("✦ ")) folderName else "✦ $folderName"
+        if (isFolderClosed(folderName) || isFolderClosed(folderWithDiamond)) return
         viewModelScope.launch {
             val dayStart = getDayStartMillis(dateMillis)
             val existingList = repository.allEntries.first()
@@ -1992,6 +2026,9 @@ class MainViewModel(private val repository: DailyEntryRepository, private val co
     }
 
     fun deletePremiumDayData(dateMillis: Long, folderName: String) {
+        if (isViewerMode.value) return
+        val folderWithDiamond = if (folderName.startsWith("✦ ")) folderName else "✦ $folderName"
+        if (isFolderClosed(folderName) || isFolderClosed(folderWithDiamond)) return
         viewModelScope.launch {
             val dayStart = getDayStartMillis(dateMillis)
             val existingList = repository.allEntries.first()
@@ -2095,6 +2132,7 @@ class MainViewModel(private val repository: DailyEntryRepository, private val co
     }
 
     fun addFolder(folder: String) {
+        if (isViewerMode.value) return
         if (folder.isNotBlank() && !folder.startsWith("★ ") && !folder.startsWith("✦ ")) {
             when (currentKhataMode.value) {
                 "MAIN" -> {
@@ -2130,6 +2168,7 @@ class MainViewModel(private val repository: DailyEntryRepository, private val co
     }
 
     fun deleteFolder(folder: String) {
+        if (isViewerMode.value) return
         when (currentKhataMode.value) {
             "MAIN" -> {
                 val current = mainFolders.value.toMutableList()
@@ -2197,6 +2236,7 @@ class MainViewModel(private val repository: DailyEntryRepository, private val co
     }
 
     fun toggleCloseAndPaidFolder(folder: String) {
+        if (isViewerMode.value) return
         if (folder.isBlank() || folder == "সব ফোল্ডার") return
         val current = closedFolders.value.toMutableSet()
         val cleanName = folder.removePrefix("★ ").removePrefix("✦ ").trim()
@@ -2255,34 +2295,40 @@ class MainViewModel(private val repository: DailyEntryRepository, private val co
     }
 
     fun insertEntry(entry: DailyEntry) {
+        if (isViewerMode.value) return
+        val adjustedEntry = if (currentKhataMode.value == "ALT" && !entry.folderName.startsWith("★ ")) {
+            entry.copy(folderName = "★ ${entry.folderName}")
+        } else if (currentKhataMode.value == "PREMIUM" && !entry.folderName.startsWith("✦ ")) {
+            entry.copy(folderName = "✦ ${entry.folderName}")
+        } else {
+            entry
+        }
+        if (isFolderClosed(adjustedEntry.folderName) || isFolderClosed(entry.folderName)) return
         viewModelScope.launch {
-            val adjustedEntry = if (currentKhataMode.value == "ALT" && !entry.folderName.startsWith("★ ")) {
-                entry.copy(folderName = "★ ${entry.folderName}")
-            } else if (currentKhataMode.value == "PREMIUM" && !entry.folderName.startsWith("✦ ")) {
-                entry.copy(folderName = "✦ ${entry.folderName}")
-            } else {
-                entry
-            }
             repository.insert(adjustedEntry)
             triggerAutoBackup(immediate = true)
         }
     }
 
     fun updateEntry(entry: DailyEntry) {
+        if (isViewerMode.value) return
+        val adjustedEntry = if (currentKhataMode.value == "ALT" && !entry.folderName.startsWith("★ ")) {
+            entry.copy(folderName = "★ ${entry.folderName}")
+        } else if (currentKhataMode.value == "PREMIUM" && !entry.folderName.startsWith("✦ ")) {
+            entry.copy(folderName = "✦ ${entry.folderName}")
+        } else {
+            entry
+        }
+        if (isFolderClosed(adjustedEntry.folderName) || isFolderClosed(entry.folderName)) return
         viewModelScope.launch {
-            val adjustedEntry = if (currentKhataMode.value == "ALT" && !entry.folderName.startsWith("★ ")) {
-                entry.copy(folderName = "★ ${entry.folderName}")
-            } else if (currentKhataMode.value == "PREMIUM" && !entry.folderName.startsWith("✦ ")) {
-                entry.copy(folderName = "✦ ${entry.folderName}")
-            } else {
-                entry
-            }
             repository.update(adjustedEntry)
             triggerAutoBackup(immediate = true)
         }
     }
 
     fun deleteEntry(entry: DailyEntry) {
+        if (isViewerMode.value) return
+        if (isFolderClosed(entry.folderName)) return
         viewModelScope.launch {
             repository.delete(entry)
             triggerAutoBackup(immediate = true)
@@ -2290,6 +2336,7 @@ class MainViewModel(private val repository: DailyEntryRepository, private val co
     }
 
     fun clearAllData() {
+        if (isViewerMode.value) return
         viewModelScope.launch {
             repository.clearAll()
             triggerAutoBackup(immediate = true)
@@ -2648,6 +2695,7 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
     val currentAvatarIdx by viewModel.profileAvatarIndex.collectAsStateWithLifecycle()
     val profileCustomAvatarUri by viewModel.profileCustomAvatarUri.collectAsStateWithLifecycle()
     val closedFolders by viewModel.closedFolders.collectAsStateWithLifecycle()
+    val isViewerMode by viewModel.isViewerMode.collectAsStateWithLifecycle()
     val isCurrentFolderClosed = remember(selectedFolder, closedFolders) {
         selectedFolder != "সব ফোল্ডার" && viewModel.isFolderClosed(selectedFolder)
     }
@@ -2672,11 +2720,18 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
     var showMonthlyHistoryDialog by remember { mutableStateOf(false) }
     var showFolderAllHistoryDialog by remember { mutableStateOf(false) }
     var folderToDelete by remember { mutableStateOf<String?>(null) }
+    var entryToDelete by remember { mutableStateOf<DailyEntry?>(null) }
 
     // Calculator states
     var isCalculatorVisible by remember { mutableStateOf(false) }
+    var isFabSpeedDialExpanded by remember { mutableStateOf(false) }
     var initialQtyByCal by remember { mutableStateOf("") }
     var initialExpenseByCal by remember { mutableStateOf("") }
+    var initialPremiumIncomeByCal by remember { mutableStateOf("") }
+    var initialPremiumNastaByCal by remember { mutableStateOf("") }
+    var initialPremiumBhatByCal by remember { mutableStateOf("") }
+    var initialPremiumGariByCal by remember { mutableStateOf("") }
+    var initialPremiumOnnanoByCal by remember { mutableStateOf("") }
 
     fun getDayStartMillis(millis: Long): Long {
         val cal = Calendar.getInstance()
@@ -2902,109 +2957,152 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
             .windowInsetsPadding(WindowInsets.safeDrawing),
         floatingActionButton = {
             if (activeBottomTab == "Home" && activeSubScreen == "DAILY_ACCOUNTS") {
-                if (currentKhataMode == "PREMIUM") {
-                Box(
-                    modifier = Modifier
-                        .size(46.dp)
-                        .testTag("add_entry_fab_premium")
-                        .clickable(
-                            interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
-                            indication = null
+                val accentColor = when (currentKhataMode) {
+                    "PREMIUM" -> Color(0xFF34D399)
+                    "ALT" -> Color(0xFFFBBF24)
+                    else -> Color(0xFF60A5FA)
+                }
+                val mainBgColor = when (currentKhataMode) {
+                    "PREMIUM" -> Color(0xFF064E3B).copy(alpha = 0.85f)
+                    "ALT" -> Color(0xFF78350F).copy(alpha = 0.85f)
+                    else -> Color(0xFF1E3A8A).copy(alpha = 0.85f)
+                }
+                val borderColor = when (currentKhataMode) {
+                    "PREMIUM" -> Color(0xFF10B981).copy(alpha = 0.55f)
+                    "ALT" -> Color(0xFFF59E0B).copy(alpha = 0.55f)
+                    else -> Color(0xFF3B82F6).copy(alpha = 0.55f)
+                }
+                val miniBtnBg = when (currentKhataMode) {
+                    "PREMIUM" -> Color(0xFF064E3B).copy(alpha = 0.95f)
+                    "ALT" -> Color(0xFF451A03).copy(alpha = 0.95f)
+                    else -> Color(0xFF0F172A).copy(alpha = 0.95f)
+                }
+
+                val fabRotation by animateFloatAsState(
+                    targetValue = if (isFabSpeedDialExpanded) 45f else 0f,
+                    animationSpec = spring(
+                        dampingRatio = Spring.DampingRatioMediumBouncy,
+                        stiffness = Spring.StiffnessLow
+                    ),
+                    label = "fab_rotation"
+                )
+
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    // Animated Speed-Dial mini buttons popping up above the main FAB
+                    AnimatedVisibility(
+                        visible = isFabSpeedDialExpanded,
+                        enter = fadeIn(animationSpec = tween(160)) +
+                                slideInVertically(
+                                    initialOffsetY = { it },
+                                    animationSpec = spring(
+                                        dampingRatio = Spring.DampingRatioMediumBouncy,
+                                        stiffness = Spring.StiffnessMediumLow
+                                    )
+                                ) + scaleIn(initialScale = 0.65f),
+                        exit = fadeOut(animationSpec = tween(120)) +
+                                slideOutVertically(
+                                    targetOffsetY = { it },
+                                    animationSpec = tween(120)
+                                ) + scaleOut(targetScale = 0.65f)
+                    ) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            if (isCurrentFolderClosed) {
-                                Toast.makeText(context, "‘$selectedFolder’ ফোল্ডারটি ‘Close and Paid’ সিলমোহর করা আছে! নতুন হিসাব যোগ করতে ড্রপডাউন থেকে সিলমোহর আনলক করুন।", Toast.LENGTH_LONG).show()
-                            } else {
-                                showPremiumAddDialog = true
+                            // 1. Calculator Mini Button (ক্যালকুলেটর)
+                            Box(
+                                modifier = Modifier
+                                    .size(38.dp)
+                                    .testTag("fab_calculator_button")
+                                    .background(miniBtnBg, CircleShape)
+                                    .border(1.dp, borderColor, CircleShape)
+                                    .clickable(
+                                        interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                                        indication = null
+                                    ) {
+                                        isFabSpeedDialExpanded = false
+                                        isCalculatorVisible = true
+                                    },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Calculate,
+                                    contentDescription = "ক্যালকুলেটর",
+                                    tint = accentColor,
+                                    modifier = Modifier.size(19.dp)
+                                )
+                            }
+
+                            // 2. Normal Add Entry Mini Button (+)
+                            Box(
+                                modifier = Modifier
+                                    .size(38.dp)
+                                    .testTag("fab_normal_add_button")
+                                    .background(miniBtnBg, CircleShape)
+                                    .border(1.dp, borderColor, CircleShape)
+                                    .clickable(
+                                        interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                                        indication = null
+                                    ) {
+                                        isFabSpeedDialExpanded = false
+                                        if (isViewerMode) {
+                                            Toast.makeText(context, "Viewers Mode সক্রিয় রয়েছে! নতুন হিসাব যোগ করা যাবে না।", Toast.LENGTH_SHORT).show()
+                                        } else if (isCurrentFolderClosed) {
+                                            Toast.makeText(context, "‘$selectedFolder’ ফোল্ডারটি ‘Close and Paid’ সিলমোহর করা আছে! নতুন হিসাব যোগ করতে ড্রপডাউন থেকে সিলমোহর আনলক করুন।", Toast.LENGTH_LONG).show()
+                                        } else {
+                                            if (currentKhataMode == "PREMIUM") {
+                                                showPremiumAddDialog = true
+                                            } else {
+                                                showAddDialog = true
+                                            }
+                                        }
+                                    },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Add,
+                                    contentDescription = "স্বাভাবিক এন্ট্রি",
+                                    tint = accentColor,
+                                    modifier = Modifier.size(20.dp)
+                                )
                             }
                         }
-                        .drawBehind {
-                            // Soft transparent green outer halo glow
-                            drawCircle(
-                                color = Color(0xFF10B981).copy(alpha = 0.15f),
-                                radius = (size.minDimension / 2f) + 6f
-                            )
-                        }
-                        .background(
-                            color = Color(0xFF064E3B).copy(alpha = 0.65f), // Transparent dark green
-                            shape = CircleShape
-                        )
-                        .border(
-                            width = 1.2.dp,
-                            color = Color(0xFF10B981).copy(alpha = 0.45f), // Matching clean green border
-                            shape = CircleShape
-                        ),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Add,
-                        contentDescription = "হিসাব যোগ",
-                        tint = Color(0xFF34D399),
-                        modifier = Modifier.size(22.dp)
-                    )
-                }
-            } else if (currentKhataMode == "ALT") {
-                Box(
-                    modifier = Modifier
-                        .size(44.dp)
-                        .testTag("add_entry_fab")
-                        .clickable(
-                            interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
-                            indication = null
-                        ) {
-                            if (isCurrentFolderClosed) {
-                                Toast.makeText(context, "‘$selectedFolder’ ফোল্ডারটি ‘Close and Paid’ সিলমোহর করা আছে! নতুন হিসাব যোগ করতে ড্রপডাউন থেকে সিলমোহর আনলক করুন।", Toast.LENGTH_LONG).show()
-                            } else {
-                                showAddDialog = true
+                    }
+
+                    // Main FAB (+)
+                    Box(
+                        modifier = Modifier
+                            .size(46.dp)
+                            .testTag(if (currentKhataMode == "PREMIUM") "add_entry_fab_premium" else "add_entry_fab")
+                            .drawBehind {
+                                drawCircle(
+                                    color = borderColor.copy(alpha = 0.2f),
+                                    radius = (size.minDimension / 2f) + 5f
+                                )
                             }
-                        }
-                        .background(
-                            color = Color(0xFF10B981).copy(alpha = 0.25f), // transparent emerald green background
-                            shape = CircleShape
+                            .background(mainBgColor, CircleShape)
+                            .border(1.2.dp, borderColor, CircleShape)
+                            .clickable(
+                                interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                                indication = null
+                            ) {
+                                isFabSpeedDialExpanded = !isFabSpeedDialExpanded
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Add,
+                            contentDescription = if (isFabSpeedDialExpanded) "মেনু বন্ধ করুন" else "হিসাব মেনু খুলুন",
+                            tint = accentColor,
+                            modifier = Modifier
+                                .size(22.dp)
+                                .rotate(fabRotation)
                         )
-                        .border(
-                            width = 1.dp,
-                            color = Color(0xFF10B981).copy(alpha = 0.5f), // clean transparent green border
-                            shape = CircleShape
-                        ),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Add,
-                        contentDescription = "হিসাব যোগ",
-                        tint = Color(0xFF34D399),
-                        modifier = Modifier.size(20.dp)
-                    )
+                    }
                 }
-            } else {
-                Box(
-                    modifier = Modifier
-                        .size(46.dp)
-                        .testTag("add_entry_fab")
-                        .clickable(
-                            interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
-                            indication = null
-                        ) {
-                            showAddDialog = true
-                        }
-                        .background(
-                            color = (if (currentKhataMode == "ALT") Color(0xFFFBBF24) else Color(0xFF3B82F6)).copy(alpha = 0.35f),
-                            shape = CircleShape
-                        )
-                        .border(
-                            width = 1.2.dp,
-                            color = (if (currentKhataMode == "ALT") Color(0xFFFBBF24) else Color(0xFF3B82F6)).copy(alpha = 0.55f),
-                            shape = CircleShape
-                        ),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Add,
-                        contentDescription = "হিসাব যোগ",
-                        tint = (if (currentKhataMode == "ALT") Color(0xFFFBBF24) else Color(0xFF3B82F6)).copy(alpha = 0.9f),
-                        modifier = Modifier.size(24.dp)
-                    )
-                }
-            }
             }
         },
         containerColor = Color.Transparent
@@ -3087,7 +3185,9 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
                     isGlass = isGlass,
                     cardBorderColor = cardBorderColor,
                     onEdit = { item ->
-                        if (viewModel.isFolderClosed(item.folderName)) {
+                        if (isViewerMode) {
+                            Toast.makeText(context, "Viewers Mode সক্রিয় রয়েছে! হিসাব এডিট বা পরিবর্তন করা যাবে না।", Toast.LENGTH_SHORT).show()
+                        } else if (viewModel.isFolderClosed(item.folderName)) {
                             Toast.makeText(context, "‘${item.folderName}’ ফোল্ডারটি ‘Close and Paid’ সিলমোহর করা আছে! হিসাব পরিবর্তন করতে সিলমোহর আনলক করুন।", Toast.LENGTH_LONG).show()
                         } else {
                             entryToEdit = item
@@ -3095,11 +3195,12 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
                         }
                     },
                     onDelete = { item ->
-                        if (viewModel.isFolderClosed(item.folderName)) {
+                        if (isViewerMode) {
+                            Toast.makeText(context, "Viewers Mode সক্রিয় রয়েছে! হিসাব ডিলিট বা মুছে ফেলা যাবে না।", Toast.LENGTH_SHORT).show()
+                        } else if (viewModel.isFolderClosed(item.folderName)) {
                             Toast.makeText(context, "‘${item.folderName}’ ফোল্ডারটি ‘Close and Paid’ সিলমোহর করা আছে! হিসাব মুছতে সিলমোহর আনলক করুন।", Toast.LENGTH_LONG).show()
                         } else {
-                            viewModel.deleteEntry(item)
-                            Toast.makeText(context, "হিসাব ডিলিট করা হয়েছে", Toast.LENGTH_SHORT).show()
+                            entryToDelete = item
                         }
                     },
                     isAltMode = (currentKhataMode == "ALT")
@@ -3405,17 +3506,33 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
                                         borderColor = Color(0xFF818CF8).copy(alpha = 0.5f),
                                         closedFolders = closedFolders,
                                         onSelectFolder = { viewModel.selectFolder(it) },
-                                        onAddNewFolder = { showAddFolderDialog = true },
-                                        onDeleteFolder = { folderToDelete = it },
+                                        onAddNewFolder = {
+                                            if (isViewerMode) {
+                                                Toast.makeText(context, "Viewers Mode সক্রিয় রয়েছে! নতুন ফোল্ডার তৈরি করা যাবে না।", Toast.LENGTH_SHORT).show()
+                                            } else {
+                                                showAddFolderDialog = true
+                                            }
+                                        },
+                                        onDeleteFolder = {
+                                            if (isViewerMode) {
+                                                Toast.makeText(context, "Viewers Mode সক্রিয় রয়েছে! ফোল্ডার ডিলিট করা যাবে না।", Toast.LENGTH_SHORT).show()
+                                            } else {
+                                                folderToDelete = it
+                                            }
+                                        },
                                         onToggleCloseAndPaid = { folder ->
-                                            viewModel.toggleCloseAndPaidFolder(folder)
-                                            val isNowClosed = viewModel.isFolderClosed(folder)
-                                            Toast.makeText(
-                                                context,
-                                                if (isNowClosed) "‘$folder’ ফোল্ডারটি ‘Close and Paid’ সিলমোহর করা হয়েছে!"
-                                                else "‘$folder’ ফোল্ডারটির ‘Close and Paid’ বন্ধ করা হয়েছে!",
-                                                Toast.LENGTH_SHORT
-                                            ).show()
+                                            if (isViewerMode) {
+                                                Toast.makeText(context, "Viewers Mode সক্রিয় রয়েছে! ফোল্ডার সিলমোহর পরিবর্তন করা যাবে না।", Toast.LENGTH_SHORT).show()
+                                            } else {
+                                                viewModel.toggleCloseAndPaidFolder(folder)
+                                                val isNowClosed = viewModel.isFolderClosed(folder)
+                                                Toast.makeText(
+                                                    context,
+                                                    if (isNowClosed) "‘$folder’ ফোল্ডারটি ‘Close and Paid’ সিলমোহর করা হয়েছে!"
+                                                    else "‘$folder’ ফোল্ডারটির ‘Close and Paid’ বন্ধ করা হয়েছে!",
+                                                    Toast.LENGTH_SHORT
+                                                ).show()
+                                            }
                                         }
                                     )
 
@@ -3872,18 +3989,18 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
                                                     .padding(horizontal = 4.dp)
                                                     .background(Color(0xFF10B981).copy(alpha = 0.08f), RoundedCornerShape(12.dp))
                                                     .border(BorderStroke(1.dp, Color(0xFF10B981).copy(alpha = 0.2f)), RoundedCornerShape(12.dp))
-                                                    .padding(vertical = 12.dp)
+                                                    .padding(vertical = 8.dp)
                                             ) {
                                                 Icon(
                                                     imageVector = Icons.Default.TrendingUp,
                                                     contentDescription = null,
                                                     tint = Color(0xFF10B981),
-                                                    modifier = Modifier.size(20.dp)
+                                                    modifier = Modifier.size(18.dp)
                                                 )
-                                                Spacer(modifier = Modifier.height(4.dp))
+                                                Spacer(modifier = Modifier.height(2.dp))
                                                 Text("মোট আয়", fontSize = 11.sp, color = Color(0xFF94A3B8), fontWeight = FontWeight.Bold)
                                                 Spacer(modifier = Modifier.height(2.dp))
-                                                Text("৳ ${dayData.first.toInt().toString().toBanglaDigits()}", fontSize = 18.sp, fontWeight = FontWeight.Black, color = Color(0xFF10B981))
+                                                Text("৳ ${dayData.first.toInt().toString().toBanglaDigits()}", fontSize = 16.sp, fontWeight = FontWeight.Black, color = Color(0xFF10B981))
                                             }
                                             
                                             Column(
@@ -3893,21 +4010,21 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
                                                     .padding(horizontal = 4.dp)
                                                     .background(Color(0xFFEF4444).copy(alpha = 0.08f), RoundedCornerShape(12.dp))
                                                     .border(BorderStroke(1.dp, Color(0xFFEF4444).copy(alpha = 0.2f)), RoundedCornerShape(12.dp))
-                                                    .padding(vertical = 12.dp)
+                                                    .padding(vertical = 8.dp)
                                             ) {
                                                 Icon(
                                                     imageVector = Icons.Default.TrendingDown,
                                                     contentDescription = null,
                                                     tint = Color(0xFFEF4444),
-                                                    modifier = Modifier.size(20.dp)
+                                                    modifier = Modifier.size(18.dp)
                                                 )
-                                                Spacer(modifier = Modifier.height(4.dp))
+                                                Spacer(modifier = Modifier.height(2.dp))
                                                 Text("মোট ব্যয়", fontSize = 11.sp, color = Color(0xFF94A3B8), fontWeight = FontWeight.Bold)
                                                 Spacer(modifier = Modifier.height(2.dp))
-                                                Text("৳ ${dayData.second.toInt().toString().toBanglaDigits()}", fontSize = 18.sp, fontWeight = FontWeight.Black, color = Color(0xFFEF4444))
+                                                Text("৳ ${dayData.second.toInt().toString().toBanglaDigits()}", fontSize = 16.sp, fontWeight = FontWeight.Black, color = Color(0xFFEF4444))
                                             }
                                         }
-                                        Spacer(modifier = Modifier.height(8.dp))
+                                        Spacer(modifier = Modifier.height(6.dp))
                                     }
 
                                     // Canvas-drawn bezier line chart exactly matching the reference image
@@ -3941,23 +4058,23 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
                                     Row(
                                         modifier = Modifier
                                             .fillMaxWidth()
-                                            .padding(top = 4.dp, bottom = 12.dp),
+                                            .padding(top = 2.dp, bottom = 8.dp),
                                         horizontalArrangement = Arrangement.Center,
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
                                         Row(
                                             verticalAlignment = Alignment.CenterVertically,
-                                            modifier = Modifier.padding(end = 24.dp)
+                                            modifier = Modifier.padding(end = 20.dp)
                                         ) {
                                             Box(
                                                 modifier = Modifier
-                                                    .size(width = 24.dp, height = 6.dp)
+                                                    .size(width = 20.dp, height = 4.5.dp)
                                                     .background(Color(0xFF10B981), RoundedCornerShape(3.dp))
                                             )
-                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Spacer(modifier = Modifier.width(6.dp))
                                             Text(
                                                 text = "আয়",
-                                                fontSize = 13.sp,
+                                                fontSize = 12.sp,
                                                 fontWeight = FontWeight.Bold,
                                                 color = Color.White
                                             )
@@ -3967,13 +4084,13 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
                                         ) {
                                             Box(
                                                 modifier = Modifier
-                                                    .size(width = 24.dp, height = 6.dp)
+                                                    .size(width = 20.dp, height = 4.5.dp)
                                                     .background(Color(0xFFEF4444), RoundedCornerShape(3.dp))
                                             )
-                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Spacer(modifier = Modifier.width(6.dp))
                                             Text(
                                                 text = "ব্যয়",
-                                                fontSize = 13.sp,
+                                                fontSize = 12.sp,
                                                 fontWeight = FontWeight.Bold,
                                                 color = Color.White
                                             )
@@ -3985,7 +4102,7 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
                                         modifier = Modifier.fillMaxWidth()
                                     ) {
                                         val containerWidth = maxWidth
-                                        val containerHeight = 180.dp
+                                        val containerHeight = 130.dp
                                         
                                         var activeDashboardPopupText by remember { mutableStateOf<String?>(null) }
                                         LaunchedEffect(activeDashboardPopupText) {
@@ -4013,7 +4130,7 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
                                             // Y-Axis Labels Column
                                             Column(
                                                 modifier = Modifier
-                                                    .width(50.dp)
+                                                    .width(44.dp)
                                                     .fillMaxHeight(),
                                                 verticalArrangement = Arrangement.SpaceBetween,
                                                 horizontalAlignment = Alignment.End
@@ -4028,14 +4145,14 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
                                                      }
                                                      Text(
                                                          text = formattedLabel,
-                                                         fontSize = 10.sp,
+                                                         fontSize = 9.5.sp,
                                                          color = Color(0xFF94A3B8).copy(alpha = 0.8f),
                                                          fontWeight = FontWeight.Bold
                                                      )
                                                  }
                                              }
 
-                                             Spacer(modifier = Modifier.width(10.dp))
+                                             Spacer(modifier = Modifier.width(6.dp))
 
                                              // Canvas drawing the beautiful curves, stars, glows, fills and axes
                                              Canvas(
@@ -4069,13 +4186,13 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
                                                     Offset(width * 0.85f, height * 0.22f)
                                                 )
                                                 stars.forEach { star ->
-                                                    drawCircle(Color(0xFF3B82F6).copy(alpha = 0.25f), radius = 5.dp.toPx(), center = star)
-                                                    drawCircle(Color.White, radius = 1.dp.toPx(), center = star)
+                                                    drawCircle(Color(0xFF3B82F6).copy(alpha = 0.2f), radius = 3.5.dp.toPx(), center = star)
+                                                    drawCircle(Color.White, radius = 0.75.dp.toPx(), center = star)
                                                 }
 
                                                 // Draw beautiful axes: left vertical axis & bottom horizontal axis
-                                                val axisColor = Color(0xFF1D4ED8).copy(alpha = 0.6f)
-                                                val axisStrokeWidth = 1.5.dp.toPx()
+                                                val axisColor = Color(0xFF1D4ED8).copy(alpha = 0.5f)
+                                                val axisStrokeWidth = 1.dp.toPx()
                                                 drawLine(
                                                     color = axisColor,
                                                     start = Offset(0f, 0f),
@@ -4093,10 +4210,10 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
                                                 for (index in graphDays.indices) {
                                                     val x = if (graphDays.size > 1) index * stepX else width / 2f
                                                     drawLine(
-                                                        color = Color(0xFF334155).copy(alpha = 0.12f),
+                                                        color = Color(0xFF334155).copy(alpha = 0.1f),
                                                         start = Offset(x, 0f),
                                                         end = Offset(x, height),
-                                                        strokeWidth = 1.dp.toPx()
+                                                        strokeWidth = 0.6.dp.toPx()
                                                     )
                                                 }
 
@@ -4105,15 +4222,14 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
                                                 for (i in 0..gridLines) {
                                                     val y = (height / gridLines) * i
                                                     drawLine(
-                                                        color = Color(0xFF334155).copy(alpha = 0.08f),
+                                                        color = Color(0xFF334155).copy(alpha = 0.07f),
                                                         start = Offset(0f, y),
                                                         end = Offset(width, y),
-                                                        strokeWidth = 1.dp.toPx()
+                                                        strokeWidth = 0.75.dp.toPx()
                                                     )
                                                 }
 
-
-                                                val strokeWidthPx = if (graphDays.size == 30) 1.2.dp.toPx() else 1.8.dp.toPx()
+                                                val strokeWidthPx = if (graphDays.size == 30) 1.0.dp.toPx() else 1.3.dp.toPx()
 
                                                 // Draw Income Area Gradient Shadow (Green) with smooth bezier interpolation
                                                 val incomeFillPath = Path().apply {
@@ -4188,13 +4304,13 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
                                                 drawPath(
                                                     path = incomePath,
                                                     color = Color(0xFF10B981).copy(alpha = 0.12f),
-                                                    style = Stroke(width = strokeWidthPx * 4f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                                                    style = Stroke(width = strokeWidthPx * 2.2f, cap = StrokeCap.Round, join = StrokeJoin.Round)
                                                 )
                                                 // Glow layer 2
                                                 drawPath(
                                                     path = incomePath,
-                                                    color = Color(0xFF10B981).copy(alpha = 0.24f),
-                                                    style = Stroke(width = strokeWidthPx * 2f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                                                    color = Color(0xFF10B981).copy(alpha = 0.22f),
+                                                    style = Stroke(width = strokeWidthPx * 1.4f, cap = StrokeCap.Round, join = StrokeJoin.Round)
                                                 )
                                                 // Sharp line
                                                 drawPath(
@@ -4222,13 +4338,13 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
                                                 drawPath(
                                                     path = expensePath,
                                                     color = Color(0xFFEF4444).copy(alpha = 0.12f),
-                                                    style = Stroke(width = strokeWidthPx * 4f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                                                    style = Stroke(width = strokeWidthPx * 2.2f, cap = StrokeCap.Round, join = StrokeJoin.Round)
                                                 )
                                                 // Glow layer 2
                                                 drawPath(
                                                     path = expensePath,
-                                                    color = Color(0xFFEF4444).copy(alpha = 0.24f),
-                                                    style = Stroke(width = strokeWidthPx * 2f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                                                    color = Color(0xFFEF4444).copy(alpha = 0.22f),
+                                                    style = Stroke(width = strokeWidthPx * 1.4f, cap = StrokeCap.Round, join = StrokeJoin.Round)
                                                 )
                                                 // Sharp line
                                                 drawPath(
@@ -4240,24 +4356,24 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
                                                 // Draw data point dots/circles
                                                 incomePoints.forEachIndexed { idx, p ->
                                                     val isToday = idx == incomePoints.size - 1 && displayOffset == 0
-                                                    val dotRadius = if (graphDays.size == 30) 2.dp else if (isToday) 6.dp else 4.dp
-                                                    val innerRadius = if (graphDays.size == 30) 1.dp else if (isToday) 3.5.dp else 2.5.dp
+                                                    val dotRadius = if (graphDays.size == 30) 1.8.dp else if (isToday) 4.5.dp else 3.2.dp
+                                                    val innerRadius = if (graphDays.size == 30) 0.9.dp else if (isToday) 2.5.dp else 1.8.dp
                                                     drawCircle(
                                                         color = Color(0xFF10B981).copy(alpha = 0.22f),
                                                         radius = dotRadius.toPx(),
                                                         center = p
-                                                    )
-                                                    drawCircle(
-                                                        color = Color(0xFF10B981),
-                                                        radius = innerRadius.toPx(),
-                                                        center = p
-                                                    )
-                                                }
+                                                     )
+                                                     drawCircle(
+                                                         color = Color(0xFF10B981),
+                                                         radius = innerRadius.toPx(),
+                                                         center = p
+                                                     )
+                                                 }
 
                                                 expensePoints.forEachIndexed { idx, p ->
                                                     val isToday = idx == expensePoints.size - 1 && displayOffset == 0
-                                                    val dotRadius = if (graphDays.size == 30) 2.dp else if (isToday) 6.dp else 4.dp
-                                                    val innerRadius = if (graphDays.size == 30) 1.dp else if (isToday) 3.5.dp else 2.5.dp
+                                                    val dotRadius = if (graphDays.size == 30) 1.8.dp else if (isToday) 4.5.dp else 3.2.dp
+                                                    val innerRadius = if (graphDays.size == 30) 0.9.dp else if (isToday) 2.5.dp else 1.8.dp
                                                     drawCircle(
                                                         color = Color(0xFFEF4444).copy(alpha = 0.22f),
                                                         radius = dotRadius.toPx(),
@@ -4274,7 +4390,7 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
                                     }
 
                                     // Overlay Floating Glowing Badges for Peaks exactly like reference image
-                                    val canvasWidth = containerWidth - 60.dp
+                                    val canvasWidth = containerWidth - 50.dp
                                     if (graphDays.isNotEmpty() && canvasWidth > 0.dp) {
                                         val stepXDp = if (graphDays.size > 1) canvasWidth / (graphDays.size - 1) else canvasWidth / 2f
 
@@ -4286,14 +4402,14 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
 
                                         // Green money bag above the Income peak
                                         if (maxIncomeVal > 0.0 && maxIncomeIndex >= 0) {
-                                            val xDp = 60.dp + (stepXDp * maxIncomeIndex)
+                                            val xDp = 50.dp + (stepXDp * maxIncomeIndex)
                                             val yPercent = (maxIncomeVal / maxVal).toFloat().coerceIn(0f, 1f)
-                                            val yDp = 180.dp - (180 * yPercent).dp
+                                            val yDp = 130.dp - (130 * yPercent).dp
 
                                             Box(
                                                 modifier = Modifier
-                                                    .offset(x = xDp - 12.dp, y = yDp - 26.dp)
-                                                    .size(24.dp)
+                                                    .offset(x = xDp - 10.dp, y = yDp - 22.dp)
+                                                    .size(20.dp)
                                                     .alpha(badgeAlpha)
                                                     .background(Color(0xFF10B981).copy(alpha = 0.2f), CircleShape)
                                                     .border(BorderStroke(1.dp, Color(0xFF10B981)), CircleShape)
@@ -4307,7 +4423,7 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
                                                     imageVector = Icons.Default.Paid,
                                                     contentDescription = null,
                                                     tint = Color(0xFF10B981),
-                                                    modifier = Modifier.size(14.dp)
+                                                    modifier = Modifier.size(12.dp)
                                                 )
                                             }
                                         }
@@ -4316,14 +4432,14 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
                                         val otherIncomeIndex = graphDays.indexOfFirst { it.second.first > 0.0 && it.second.first != maxIncomeVal }
                                         if (otherIncomeIndex >= 0) {
                                             val otherVal = graphDays[otherIncomeIndex].second.first
-                                            val xDp = 60.dp + (stepXDp * otherIncomeIndex)
+                                            val xDp = 50.dp + (stepXDp * otherIncomeIndex)
                                             val yPercent = (otherVal / maxVal).toFloat().coerceIn(0f, 1f)
-                                            val yDp = 180.dp - (180 * yPercent).dp
+                                            val yDp = 130.dp - (130 * yPercent).dp
 
                                             Box(
                                                 modifier = Modifier
-                                                    .offset(x = xDp - 12.dp, y = yDp - 26.dp)
-                                                    .size(24.dp)
+                                                    .offset(x = xDp - 10.dp, y = yDp - 22.dp)
+                                                    .size(20.dp)
                                                     .alpha(badgeAlpha)
                                                     .background(Color(0xFF10B981).copy(alpha = 0.2f), CircleShape)
                                                     .border(BorderStroke(1.dp, Color(0xFF10B981)), CircleShape)
@@ -4337,21 +4453,21 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
                                                     imageVector = Icons.Default.Paid,
                                                     contentDescription = null,
                                                     tint = Color(0xFF10B981),
-                                                    modifier = Modifier.size(14.dp)
+                                                    modifier = Modifier.size(12.dp)
                                                 )
                                             }
                                         }
 
                                         // Red coin stack above the Expense peak
                                         if (maxExpenseVal > 0.0 && maxExpenseIndex >= 0) {
-                                            val xDp = 60.dp + (stepXDp * maxExpenseIndex)
+                                            val xDp = 50.dp + (stepXDp * maxExpenseIndex)
                                             val yPercent = (maxExpenseVal / maxVal).toFloat().coerceIn(0f, 1f)
-                                            val yDp = 180.dp - (180 * yPercent).dp
+                                            val yDp = 130.dp - (130 * yPercent).dp
 
                                             Box(
                                                 modifier = Modifier
-                                                    .offset(x = xDp - 12.dp, y = yDp - 26.dp)
-                                                    .size(24.dp)
+                                                    .offset(x = xDp - 10.dp, y = yDp - 22.dp)
+                                                    .size(20.dp)
                                                     .alpha(badgeAlpha)
                                                     .background(Color(0xFFEF4444).copy(alpha = 0.2f), CircleShape)
                                                     .border(BorderStroke(1.dp, Color(0xFFEF4444)), CircleShape)
@@ -4365,7 +4481,7 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
                                                     imageVector = Icons.Default.Paid,
                                                     contentDescription = null,
                                                     tint = Color(0xFFEF4444),
-                                                    modifier = Modifier.size(14.dp)
+                                                    modifier = Modifier.size(12.dp)
                                                 )
                                             }
                                         }
@@ -4407,13 +4523,13 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
                                      }
                                  }
 
-                                Spacer(modifier = Modifier.height(14.dp))
+                                Spacer(modifier = Modifier.height(8.dp))
 
                                 // Bottom Day Labels (Horizontal timeline) perfectly aligned with the dots!
                                 Row(
                                     modifier = Modifier.fillMaxWidth()
                                 ) {
-                                    Spacer(modifier = Modifier.width(60.dp))
+                                    Spacer(modifier = Modifier.width(50.dp))
 
                                     Row(
                                         modifier = Modifier.weight(1f),
@@ -4595,7 +4711,9 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
                                     ) {
                                         IconButton(
                                             onClick = {
-                                                if (isCurrentFolderClosed) {
+                                                if (isViewerMode) {
+                                                    Toast.makeText(context, "Viewers Mode সক্রিয় রয়েছে! হিসাব এডিট বা পরিবর্তন করা যাবে না।", Toast.LENGTH_SHORT).show()
+                                                } else if (isCurrentFolderClosed) {
                                                     Toast.makeText(context, "‘$selectedFolder’ ফোল্ডারটি ‘Close and Paid’ সিলমোহর করা আছে! হিসাব পরিবর্তন করতে সিলমোহর আনলক করুন।", Toast.LENGTH_LONG).show()
                                                 } else {
                                                     premiumEditDayDialogData = PremiumDayEditData(
@@ -4617,7 +4735,9 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
 
                                         IconButton(
                                             onClick = {
-                                                if (isCurrentFolderClosed) {
+                                                if (isViewerMode) {
+                                                    Toast.makeText(context, "Viewers Mode সক্রিয় রয়েছে! হিসাব ডিলিট বা মুছে ফেলা যাবে না।", Toast.LENGTH_SHORT).show()
+                                                } else if (isCurrentFolderClosed) {
                                                     Toast.makeText(context, "‘$selectedFolder’ ফোল্ডারটি ‘Close and Paid’ সিলমোহর করা আছে! হিসাব মুছতে সিলমোহর আনলক করুন।", Toast.LENGTH_LONG).show()
                                                 } else {
                                                     premiumDayToDeleteMillis = day.dateMillis
@@ -4685,17 +4805,33 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
                                         borderColor = Color(0xFFFBBF24).copy(alpha = 0.5f),
                                         closedFolders = closedFolders,
                                         onSelectFolder = { viewModel.selectFolder(it) },
-                                        onAddNewFolder = { showAddFolderDialog = true },
-                                        onDeleteFolder = { folderToDelete = it },
+                                        onAddNewFolder = {
+                                            if (isViewerMode) {
+                                                Toast.makeText(context, "Viewers Mode সক্রিয় রয়েছে! নতুন ফোল্ডার তৈরি করা যাবে না।", Toast.LENGTH_SHORT).show()
+                                            } else {
+                                                showAddFolderDialog = true
+                                            }
+                                        },
+                                        onDeleteFolder = {
+                                            if (isViewerMode) {
+                                                Toast.makeText(context, "Viewers Mode সক্রিয় রয়েছে! ফোল্ডার ডিলিট করা যাবে না।", Toast.LENGTH_SHORT).show()
+                                            } else {
+                                                folderToDelete = it
+                                            }
+                                        },
                                         onToggleCloseAndPaid = { folder ->
-                                            viewModel.toggleCloseAndPaidFolder(folder)
-                                            val isNowClosed = viewModel.isFolderClosed(folder)
-                                            Toast.makeText(
-                                                context,
-                                                if (isNowClosed) "‘$folder’ ফোল্ডারটি ‘Close and Paid’ সিলমোহর করা হয়েছে!"
-                                                else "‘$folder’ ফোল্ডারটির ‘Close and Paid’ বন্ধ করা হয়েছে!",
-                                                Toast.LENGTH_SHORT
-                                            ).show()
+                                            if (isViewerMode) {
+                                                Toast.makeText(context, "Viewers Mode সক্রিয় রয়েছে! ফোল্ডার সিলমোহর পরিবর্তন করা যাবে না।", Toast.LENGTH_SHORT).show()
+                                            } else {
+                                                viewModel.toggleCloseAndPaidFolder(folder)
+                                                val isNowClosed = viewModel.isFolderClosed(folder)
+                                                Toast.makeText(
+                                                    context,
+                                                    if (isNowClosed) "‘$folder’ ফোল্ডারটি ‘Close and Paid’ সিলমোহর করা হয়েছে!"
+                                                    else "‘$folder’ ফোল্ডারটির ‘Close and Paid’ বন্ধ করা হয়েছে!",
+                                                    Toast.LENGTH_SHORT
+                                                ).show()
+                                            }
                                         }
                                     )
 
@@ -4908,17 +5044,33 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
                                         borderColor = Color(0xFF3B82F6).copy(alpha = 0.5f),
                                         closedFolders = closedFolders,
                                         onSelectFolder = { viewModel.selectFolder(it) },
-                                        onAddNewFolder = { showAddFolderDialog = true },
-                                        onDeleteFolder = { folderToDelete = it },
+                                        onAddNewFolder = {
+                                            if (isViewerMode) {
+                                                Toast.makeText(context, "Viewers Mode সক্রিয় রয়েছে! নতুন ফোল্ডার তৈরি করা যাবে না।", Toast.LENGTH_SHORT).show()
+                                            } else {
+                                                showAddFolderDialog = true
+                                            }
+                                        },
+                                        onDeleteFolder = {
+                                            if (isViewerMode) {
+                                                Toast.makeText(context, "Viewers Mode সক্রিয় রয়েছে! ফোল্ডার ডিলিট করা যাবে না।", Toast.LENGTH_SHORT).show()
+                                            } else {
+                                                folderToDelete = it
+                                            }
+                                        },
                                         onToggleCloseAndPaid = { folder ->
-                                            viewModel.toggleCloseAndPaidFolder(folder)
-                                            val isNowClosed = viewModel.isFolderClosed(folder)
-                                            Toast.makeText(
-                                                context,
-                                                if (isNowClosed) "‘$folder’ ফোল্ডারটি ‘Close and Paid’ সিলমোহর করা হয়েছে!"
-                                                else "‘$folder’ ফোল্ডারটির ‘Close and Paid’ বন্ধ করা হয়েছে!",
-                                                Toast.LENGTH_SHORT
-                                            ).show()
+                                            if (isViewerMode) {
+                                                Toast.makeText(context, "Viewers Mode সক্রিয় রয়েছে! ফোল্ডার সিলমোহর পরিবর্তন করা যাবে না।", Toast.LENGTH_SHORT).show()
+                                            } else {
+                                                viewModel.toggleCloseAndPaidFolder(folder)
+                                                val isNowClosed = viewModel.isFolderClosed(folder)
+                                                Toast.makeText(
+                                                    context,
+                                                    if (isNowClosed) "‘$folder’ ফোল্ডারটি ‘Close and Paid’ সিলমোহর করা হয়েছে!"
+                                                    else "‘$folder’ ফোল্ডারটির ‘Close and Paid’ বন্ধ করা হয়েছে!",
+                                                    Toast.LENGTH_SHORT
+                                                ).show()
+                                            }
                                         }
                                     )
 
@@ -6058,7 +6210,9 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
                                 entry = item,
                                 wageRate = wageRate,
                                 onEdit = {
-                                    if (viewModel.isFolderClosed(item.folderName)) {
+                                    if (isViewerMode) {
+                                        Toast.makeText(context, "Viewers Mode সক্রিয় রয়েছে! হিসাব এডিট বা পরিবর্তন করা যাবে না।", Toast.LENGTH_SHORT).show()
+                                    } else if (viewModel.isFolderClosed(item.folderName)) {
                                         Toast.makeText(context, "‘${item.folderName}’ ফোল্ডারটি ‘Close and Paid’ সিলমোহর করা আছে! হিসাব পরিবর্তন করতে সিলমোহর আনলক করুন।", Toast.LENGTH_LONG).show()
                                     } else {
                                         entryToEdit = item
@@ -6066,11 +6220,12 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
                                     }
                                 },
                                 onDelete = {
-                                    if (viewModel.isFolderClosed(item.folderName)) {
+                                    if (isViewerMode) {
+                                        Toast.makeText(context, "Viewers Mode সক্রিয় রয়েছে! হিসাব ডিলিট বা মুছে ফেলা যাবে না।", Toast.LENGTH_SHORT).show()
+                                    } else if (viewModel.isFolderClosed(item.folderName)) {
                                         Toast.makeText(context, "‘${item.folderName}’ ফোল্ডারটি ‘Close and Paid’ সিলমোহর করা আছে! হিসাব মুছতে সিলমোহর আনলক করুন।", Toast.LENGTH_LONG).show()
                                     } else {
-                                        viewModel.deleteEntry(item)
-                                        Toast.makeText(context, "হিসাব ডিলিট করা হয়েছে", Toast.LENGTH_SHORT).show()
+                                        entryToDelete = item
                                     }
                                 },
                                 cardBgColor = cardBgColor,
@@ -6207,6 +6362,11 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
             confirmButton = {
                 Button(
                     onClick = {
+                        if (isViewerMode) {
+                            Toast.makeText(context, "Viewers Mode সক্রিয় রয়েছে! ফোল্ডার ডিলিট করা যাবে না।", Toast.LENGTH_SHORT).show()
+                            folderToDelete = null
+                            return@Button
+                        }
                         val folder = targetFolder
                         folderToDelete = null
                         viewModel.deleteFolder(folder)
@@ -6240,6 +6400,175 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
         )
     }
 
+    // 0.1 ENTRY DELETE CONFIRMATION DIALOG (SAFETY POLICY)
+    if (entryToDelete != null) {
+        val targetEntry = entryToDelete!!
+        val formattedEntryDate = remember(targetEntry.dateMillis) {
+            val sdf = SimpleDateFormat("dd MMMM, yyyy", Locale("bn"))
+            sdf.format(Date(targetEntry.dateMillis)).toBanglaDigits()
+        }
+
+        var entryDeleteCountdown by remember(targetEntry) { mutableStateOf(5) }
+
+        LaunchedEffect(targetEntry) {
+            entryDeleteCountdown = 5
+            while (entryDeleteCountdown > 0) {
+                kotlinx.coroutines.delay(1000L)
+                entryDeleteCountdown--
+            }
+        }
+
+        AlertDialog(
+            onDismissRequest = { entryToDelete = null },
+            containerColor = Color(0xFF0F172A),
+            shape = RoundedCornerShape(20.dp),
+            title = {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(38.dp)
+                            .background(Color(0xFFEF4444).copy(alpha = 0.2f), RoundedCornerShape(10.dp)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Warning,
+                            contentDescription = null,
+                            tint = Color(0xFFEF4444),
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+                    Column {
+                        Text(
+                            text = "হিসাব ডিলিট নিশ্চিতকরণ",
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White
+                        )
+                        Text(
+                            text = "স্থায়ীভাবে মুছে ফেলা হবে",
+                            fontSize = 11.sp,
+                            color = Color(0xFFF87171)
+                        )
+                    }
+                }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(
+                        text = "আপনি কি নিশ্চিত যে আপনি এই হিসাবটি স্থায়ীভাবে মুছে ফেলতে চান?",
+                        fontSize = 13.5.sp,
+                        color = Color(0xFFE2E8F0),
+                        lineHeight = 19.sp
+                    )
+
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFF450A0A).copy(alpha = 0.6f)),
+                        shape = RoundedCornerShape(10.dp),
+                        border = BorderStroke(1.dp, Color(0xFFEF4444).copy(alpha = 0.5f))
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Text(
+                                text = "তারিখ: $formattedEntryDate",
+                                fontSize = 12.sp,
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold
+                            )
+                            if (targetEntry.isIncome) {
+                                Text(
+                                    text = "আয়: ৳${targetEntry.income.toInt().toBangla()}",
+                                    fontSize = 11.5.sp,
+                                    color = Color(0xFF34D399),
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            } else {
+                                if (targetEntry.quantity > 0) {
+                                    Text(
+                                        text = "পরিমাণ: ${targetEntry.quantity.toBangla()} টি | রেট: ৳${wageRate.toInt().toBangla()}",
+                                        fontSize = 11.5.sp,
+                                        color = Color(0xFF93C5FD)
+                                    )
+                                }
+                                if (targetEntry.expense > 0) {
+                                    Text(
+                                        text = "খরচ: ৳${targetEntry.expense.toInt().toBangla()} (${targetEntry.category})",
+                                        fontSize = 11.5.sp,
+                                        color = Color(0xFFF87171),
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
+                            }
+                            if (targetEntry.note.isNotBlank()) {
+                                Text(
+                                    text = "নোট: ${targetEntry.note}",
+                                    fontSize = 11.sp,
+                                    color = Color(0xFFCBD5E1)
+                                )
+                            }
+                            Text(
+                                text = "ফোল্ডার: ${targetEntry.folderName}",
+                                fontSize = 10.5.sp,
+                                color = Color(0xFF94A3B8)
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = "ডিলিট করার পর এই হিসাবটি আর পুনরুদ্ধার করা যাবে না।",
+                                fontSize = 10.5.sp,
+                                color = Color(0xFFFCA5A5),
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        if (isViewerMode) {
+                            Toast.makeText(context, "Viewers Mode সক্রিয় রয়েছে! হিসাব ডিলিট করা যাবে না।", Toast.LENGTH_SHORT).show()
+                            entryToDelete = null
+                            return@Button
+                        }
+                        val item = targetEntry
+                        entryToDelete = null
+                        viewModel.deleteEntry(item)
+                        Toast.makeText(context, "হিসাবটি সফলভাবে মুছে ফেলা হয়েছে", Toast.LENGTH_SHORT).show()
+                    },
+                    enabled = entryDeleteCountdown <= 0,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color(0xFFEF4444),
+                        disabledContainerColor = Color(0xFFEF4444).copy(alpha = 0.35f),
+                        disabledContentColor = Color.White.copy(alpha = 0.5f)
+                    ),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Text(
+                        text = if (entryDeleteCountdown > 0) "হ্যাঁ, মুছে ফেলুন (${entryDeleteCountdown.toBangla()} সে.)" else "হ্যাঁ, মুছে ফেলুন",
+                        color = if (entryDeleteCountdown <= 0) Color.White else Color.White.copy(alpha = 0.7f),
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 12.sp
+                    )
+                }
+            },
+            dismissButton = {
+                OutlinedButton(
+                    onClick = { entryToDelete = null },
+                    shape = RoundedCornerShape(10.dp),
+                    border = BorderStroke(1.dp, Color.White.copy(alpha = 0.2f))
+                ) {
+                    Text("বাতিল", color = Color(0xFFCBD5E1), fontSize = 12.sp)
+                }
+            }
+        )
+    }
+
     if (showFolderAllHistoryDialog) {
         FolderAllHistoryDialog(
             folderName = selectedFolder,
@@ -6248,7 +6577,9 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
             wageRate = wageRate,
             onDismiss = { showFolderAllHistoryDialog = false },
             onEditEntry = { item ->
-                if (viewModel.isFolderClosed(item.folderName)) {
+                if (isViewerMode) {
+                    Toast.makeText(context, "Viewers Mode সক্রিয় রয়েছে! হিসাব এডিট বা পরিবর্তন করা যাবে না।", Toast.LENGTH_SHORT).show()
+                } else if (viewModel.isFolderClosed(item.folderName)) {
                     Toast.makeText(context, "‘${item.folderName}’ ফোল্ডারটি ‘Close and Paid’ সিলমোহর করা আছে! হিসাব পরিবর্তন করতে সিলমোহর আনলক করুন।", Toast.LENGTH_LONG).show()
                 } else {
                     entryToEdit = item
@@ -6257,11 +6588,12 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
                 }
             },
             onDeleteEntry = { item ->
-                if (viewModel.isFolderClosed(item.folderName)) {
+                if (isViewerMode) {
+                    Toast.makeText(context, "Viewers Mode সক্রিয় রয়েছে! হিসাব ডিলিট বা মুছে ফেলা যাবে না।", Toast.LENGTH_SHORT).show()
+                } else if (viewModel.isFolderClosed(item.folderName)) {
                     Toast.makeText(context, "‘${item.folderName}’ ফোল্ডারটি ‘Close and Paid’ সিলমোহর করা আছে! হিসাব মুছতে সিলমোহর আনলক করুন।", Toast.LENGTH_LONG).show()
                 } else {
-                    viewModel.deleteEntry(item)
-                    Toast.makeText(context, "হিসাব ডিলিট করা হয়েছে", Toast.LENGTH_SHORT).show()
+                    entryToDelete = item
                 }
             }
         )
@@ -6286,37 +6618,47 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
                 initialExpenseByCal = ""
             },
             onSave = { updatedQty, updatedExpense, updatedIncome, updatedCategory, updatedIsIncome, updatedNote, updatedFolder, updatedDate ->
-                if (entryToEdit == null) {
-                    val newEntry = DailyEntry(
-                        dateMillis = updatedDate,
-                        quantity = updatedQty,
-                        expense = updatedExpense,
-                        income = updatedIncome,
-                        category = updatedCategory,
-                        isIncome = updatedIsIncome,
-                        note = updatedNote,
-                        folderName = updatedFolder
-                    )
-                    viewModel.insertEntry(newEntry)
-                    Toast.makeText(context, "হিসাব সফলভাবে যোগ হয়েছে!", Toast.LENGTH_SHORT).show()
+                if (isViewerMode) {
+                    Toast.makeText(context, "Viewers Mode সক্রিয় রয়েছে! হিসাব যোগ বা এডিট করা যাবে না।", Toast.LENGTH_SHORT).show()
+                    showAddDialog = false
+                    entryToEdit = null
+                    initialQtyByCal = ""
+                    initialExpenseByCal = ""
+                } else if (viewModel.isFolderClosed(updatedFolder)) {
+                    Toast.makeText(context, "‘$updatedFolder’ ফোল্ডারটি ‘Close and Paid’ সিলমোহর করা আছে! এখানে হিসাব যোগ বা পরিবর্তন করা যাবে না।", Toast.LENGTH_LONG).show()
                 } else {
-                    val edited = entryToEdit!!.copy(
-                        dateMillis = updatedDate,
-                        quantity = updatedQty,
-                        expense = updatedExpense,
-                        income = updatedIncome,
-                        category = updatedCategory,
-                        isIncome = updatedIsIncome,
-                        note = updatedNote,
-                        folderName = updatedFolder
-                    )
-                    viewModel.updateEntry(edited)
-                    Toast.makeText(context, "হিসাব সফলভাবে আপডেট হয়েছে!", Toast.LENGTH_SHORT).show()
+                    if (entryToEdit == null) {
+                        val newEntry = DailyEntry(
+                            dateMillis = updatedDate,
+                            quantity = updatedQty,
+                            expense = updatedExpense,
+                            income = updatedIncome,
+                            category = updatedCategory,
+                            isIncome = updatedIsIncome,
+                            note = updatedNote,
+                            folderName = updatedFolder
+                        )
+                        viewModel.insertEntry(newEntry)
+                        Toast.makeText(context, "হিসাব সফলভাবে যোগ হয়েছে!", Toast.LENGTH_SHORT).show()
+                    } else {
+                        val edited = entryToEdit!!.copy(
+                            dateMillis = updatedDate,
+                            quantity = updatedQty,
+                            expense = updatedExpense,
+                            income = updatedIncome,
+                            category = updatedCategory,
+                            isIncome = updatedIsIncome,
+                            note = updatedNote,
+                            folderName = updatedFolder
+                        )
+                        viewModel.updateEntry(edited)
+                        Toast.makeText(context, "হিসাব সফলভাবে আপডেট হয়েছে!", Toast.LENGTH_SHORT).show()
+                    }
+                    showAddDialog = false
+                    entryToEdit = null
+                    initialQtyByCal = ""
+                    initialExpenseByCal = ""
                 }
-                showAddDialog = false
-                entryToEdit = null
-                initialQtyByCal = ""
-                initialExpenseByCal = ""
             }
         )
     }
@@ -6333,16 +6675,61 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
     if (isCalculatorVisible) {
         Royal3DCalculatorDialog(
             onDismiss = { isCalculatorVisible = false },
+            currentKhataMode = currentKhataMode,
             onTransferToEntry = { value, type ->
-                if (type == "QTY") {
-                    initialQtyByCal = value
-                    initialExpenseByCal = ""
+                if (isViewerMode) {
+                    Toast.makeText(context, "Viewers Mode সক্রিয় রয়েছে! হিসাব যোগ করা যাবে না।", Toast.LENGTH_SHORT).show()
+                } else if (isCurrentFolderClosed) {
+                    Toast.makeText(context, "‘$selectedFolder’ ফোল্ডারটি ‘Close and Paid’ সিলমোহর করা আছে! নতুন হিসাব যোগ করতে ড্রপডাউন থেকে সিলমোহর আনলক করুন।", Toast.LENGTH_LONG).show()
                 } else {
-                    initialExpenseByCal = value
-                    initialQtyByCal = ""
+                    isCalculatorVisible = false
+                    when (type) {
+                        "QTY" -> {
+                            initialQtyByCal = value
+                            initialExpenseByCal = ""
+                            showAddDialog = true
+                        }
+                        "EXPENSE" -> {
+                            initialExpenseByCal = value
+                            initialQtyByCal = ""
+                            showAddDialog = true
+                        }
+                        "INCOME" -> {
+                            initialExpenseByCal = ""
+                            initialQtyByCal = ""
+                            showAddDialog = true
+                        }
+                        "PREMIUM_ONNANO" -> {
+                            initialPremiumOnnanoByCal = value
+                            showPremiumAddDialog = true
+                        }
+                        "PREMIUM_NASTA" -> {
+                            initialPremiumNastaByCal = value
+                            showPremiumAddDialog = true
+                        }
+                        "PREMIUM_BHAT" -> {
+                            initialPremiumBhatByCal = value
+                            showPremiumAddDialog = true
+                        }
+                        "PREMIUM_GARI" -> {
+                            initialPremiumGariByCal = value
+                            showPremiumAddDialog = true
+                        }
+                        "PREMIUM_INCOME" -> {
+                            initialPremiumIncomeByCal = value
+                            showPremiumAddDialog = true
+                        }
+                        else -> {
+                            if (currentKhataMode == "PREMIUM") {
+                                initialPremiumOnnanoByCal = value
+                                showPremiumAddDialog = true
+                            } else {
+                                initialExpenseByCal = value
+                                showAddDialog = true
+                            }
+                        }
+                    }
                 }
-                showAddDialog = true
-                isCalculatorVisible = false
             }
         )
     }
@@ -6471,6 +6858,11 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
             confirmButton = {
                 TextButton(
                     onClick = {
+                        if (isViewerMode) {
+                            Toast.makeText(context, "Viewers Mode সক্রিয় রয়েছে! হিসাব এডিট বা সংরক্ষণ করা যাবে না।", Toast.LENGTH_SHORT).show()
+                            premiumEditDayDialogData = null
+                            return@TextButton
+                        }
                         val income = editIncome.toDoubleOrNull() ?: 0.0
                         val nasta = editNasta.toDoubleOrNull() ?: 0.0
                         val bhat = editBhat.toDoubleOrNull() ?: 0.0
@@ -6497,6 +6889,11 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     TextButton(
                         onClick = {
+                            if (isViewerMode) {
+                                Toast.makeText(context, "Viewers Mode সক্রিয় রয়েছে! হিসাব মুছে ফেলা যাবে না।", Toast.LENGTH_SHORT).show()
+                                premiumEditDayDialogData = null
+                                return@TextButton
+                            }
                             val currentMillis = editData.dateMillis
                             premiumEditDayDialogData = null
                             premiumDayToDeleteMillis = currentMillis
@@ -6514,45 +6911,135 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
 
     if (premiumDayToDeleteMillis != null) {
         val deleteDateMillis = premiumDayToDeleteMillis!!
-        val formattedDeleteDate = remember {
+        val formattedDeleteDate = remember(deleteDateMillis) {
             val sdf = SimpleDateFormat("dd MMMM, yyyy", Locale("bn"))
             sdf.format(Date(deleteDateMillis)).toBanglaDigits()
+        }
+
+        var premiumDeleteCountdown by remember(deleteDateMillis) { mutableStateOf(5) }
+
+        LaunchedEffect(deleteDateMillis) {
+            premiumDeleteCountdown = 5
+            while (premiumDeleteCountdown > 0) {
+                kotlinx.coroutines.delay(1000L)
+                premiumDeleteCountdown--
+            }
         }
 
         AlertDialog(
             onDismissRequest = { premiumDayToDeleteMillis = null },
             containerColor = Color(0xFF0F172A),
-            shape = RoundedCornerShape(24.dp),
-            modifier = Modifier.border(1.5.dp, Color(0xFFEF4444).copy(alpha = 0.5f), RoundedCornerShape(24.dp)),
+            shape = RoundedCornerShape(20.dp),
             title = {
-                Text(
-                    text = "হিসাব মুছে ফেলুন",
-                    fontWeight = FontWeight.Bold,
-                    color = Color.White,
-                    fontSize = 16.sp
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(38.dp)
+                            .background(Color(0xFFEF4444).copy(alpha = 0.2f), RoundedCornerShape(10.dp)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Warning,
+                            contentDescription = null,
+                            tint = Color(0xFFEF4444),
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+                    Column {
+                        Text(
+                            text = "হিসাব ডিলিট নিশ্চিতকরণ",
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White
+                        )
+                        Text(
+                            text = "স্থায়ীভাবে মুছে ফেলা হবে",
+                            fontSize = 11.sp,
+                            color = Color(0xFFF87171)
+                        )
+                    }
+                }
             },
             text = {
-                Text(
-                    text = "আপনি কি নিশ্চিতভাবে $formattedDeleteDate তারিখের সম্পূর্ণ হিসাবটি মুছে ফেলতে চান?",
-                    color = Color(0xFFE2E8F0),
-                    fontSize = 14.sp
-                )
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(
+                        text = "আপনি কি নিশ্চিতভাবে $formattedDeleteDate তারিখের সম্পূর্ণ হিসাবটি মুছে ফেলতে চান?",
+                        fontSize = 13.5.sp,
+                        color = Color(0xFFE2E8F0),
+                        lineHeight = 19.sp
+                    )
+
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFF450A0A).copy(alpha = 0.6f)),
+                        shape = RoundedCornerShape(10.dp),
+                        border = BorderStroke(1.dp, Color(0xFFEF4444).copy(alpha = 0.5f))
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Text(
+                                text = "তারিখ: $formattedDeleteDate",
+                                fontSize = 12.sp,
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "ফোল্ডার: $selectedFolder",
+                                fontSize = 11.sp,
+                                color = Color(0xFF94A3B8)
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = "ডিলিট করার পর এই দিনের যাবতীয় আয় ও ব্যয়ের তথ্য আর পুনরুদ্ধার করা যাবে না।",
+                                fontSize = 10.5.sp,
+                                color = Color(0xFFFCA5A5),
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+                }
             },
             confirmButton = {
-                TextButton(
+                Button(
                     onClick = {
+                        if (isViewerMode) {
+                            Toast.makeText(context, "Viewers Mode সক্রিয় রয়েছে! হিসাব মুছে ফেলা যাবে না।", Toast.LENGTH_SHORT).show()
+                            premiumDayToDeleteMillis = null
+                            return@Button
+                        }
                         viewModel.deletePremiumDayData(deleteDateMillis, selectedFolder)
                         premiumDayToDeleteMillis = null
                         Toast.makeText(context, "হিসাবটি সফলভাবে মুছে ফেলা হয়েছে", Toast.LENGTH_SHORT).show()
-                    }
+                    },
+                    enabled = premiumDeleteCountdown <= 0,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color(0xFFEF4444),
+                        disabledContainerColor = Color(0xFFEF4444).copy(alpha = 0.35f),
+                        disabledContentColor = Color.White.copy(alpha = 0.5f)
+                    ),
+                    shape = RoundedCornerShape(10.dp)
                 ) {
-                    Text("মুছে ফেলুন", color = Color(0xFFEF4444), fontWeight = FontWeight.Bold)
+                    Text(
+                        text = if (premiumDeleteCountdown > 0) "হ্যাঁ, মুছে ফেলুন (${premiumDeleteCountdown.toBangla()} সে.)" else "হ্যাঁ, মুছে ফেলুন",
+                        color = if (premiumDeleteCountdown <= 0) Color.White else Color.White.copy(alpha = 0.7f),
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 12.sp
+                    )
                 }
             },
             dismissButton = {
-                TextButton(onClick = { premiumDayToDeleteMillis = null }) {
-                    Text("বাতিল", color = Color(0xFF94A3B8))
+                OutlinedButton(
+                    onClick = { premiumDayToDeleteMillis = null },
+                    shape = RoundedCornerShape(10.dp),
+                    border = BorderStroke(1.dp, Color.White.copy(alpha = 0.2f))
+                ) {
+                    Text("বাতিল", color = Color(0xFFCBD5E1), fontSize = 12.sp)
                 }
             }
         )
@@ -6560,11 +7047,11 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
 
     if (showPremiumAddDialog) {
         var addSelectedDate by remember { mutableStateOf(System.currentTimeMillis()) }
-        var addIncome by remember { mutableStateOf("") }
-        var addNasta by remember { mutableStateOf("") }
-        var addBhat by remember { mutableStateOf("") }
-        var addGariBhara by remember { mutableStateOf("") }
-        var addOnnano by remember { mutableStateOf("") }
+        var addIncome by remember { mutableStateOf(initialPremiumIncomeByCal) }
+        var addNasta by remember { mutableStateOf(initialPremiumNastaByCal) }
+        var addBhat by remember { mutableStateOf(initialPremiumBhatByCal) }
+        var addGariBhara by remember { mutableStateOf(initialPremiumGariByCal) }
+        var addOnnano by remember { mutableStateOf(initialPremiumOnnanoByCal) }
 
         var showFolderDropdown by remember { mutableStateOf(false) }
         var selectedFolderForAdd by remember {
@@ -6786,30 +7273,49 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
             confirmButton = {
                 TextButton(
                     onClick = {
-                        val incomeVal = addIncome.toDoubleOrNull() ?: 0.0
-                        val nastaVal = addNasta.toDoubleOrNull() ?: 0.0
-                        val bhatVal = addBhat.toDoubleOrNull() ?: 0.0
-                        val gariVal = addGariBhara.toDoubleOrNull() ?: 0.0
-                        val onnanoVal = addOnnano.toDoubleOrNull() ?: 0.0
+                        if (isViewerMode) {
+                            Toast.makeText(context, "Viewers Mode সক্রিয় রয়েছে! নতুন হিসাব যোগ করা যাবে না।", Toast.LENGTH_SHORT).show()
+                            showPremiumAddDialog = false
+                        } else if (viewModel.isFolderClosed(selectedFolderForAdd)) {
+                            Toast.makeText(context, "‘$selectedFolderForAdd’ ফোল্ডারটি ‘Close and Paid’ সিলমোহর করা আছে! এখানে হিসাব যোগ করা যাবে না।", Toast.LENGTH_LONG).show()
+                        } else {
+                            val incomeVal = addIncome.toDoubleOrNull() ?: 0.0
+                            val nastaVal = addNasta.toDoubleOrNull() ?: 0.0
+                            val bhatVal = addBhat.toDoubleOrNull() ?: 0.0
+                            val gariVal = addGariBhara.toDoubleOrNull() ?: 0.0
+                            val onnanoVal = addOnnano.toDoubleOrNull() ?: 0.0
 
-                        viewModel.savePremiumDayData(
-                            addSelectedDate,
-                            incomeVal,
-                            nastaVal,
-                            bhatVal,
-                            gariVal,
-                            onnanoVal,
-                            selectedFolderForAdd
-                        )
-                        showPremiumAddDialog = false
-                        Toast.makeText(context, "হিসাব সফলভাবে যোগ করা হয়েছে", Toast.LENGTH_SHORT).show()
+                            viewModel.savePremiumDayData(
+                                addSelectedDate,
+                                incomeVal,
+                                nastaVal,
+                                bhatVal,
+                                gariVal,
+                                onnanoVal,
+                                selectedFolderForAdd
+                            )
+                            showPremiumAddDialog = false
+                            initialPremiumIncomeByCal = ""
+                            initialPremiumNastaByCal = ""
+                            initialPremiumBhatByCal = ""
+                            initialPremiumGariByCal = ""
+                            initialPremiumOnnanoByCal = ""
+                            Toast.makeText(context, "হিসাব সফলভাবে যোগ করা হয়েছে", Toast.LENGTH_SHORT).show()
+                        }
                     }
                 ) {
                     Text("যোগ করুন", color = Color(0xFF34D399), fontWeight = FontWeight.Bold)
                 }
             },
             dismissButton = {
-                TextButton(onClick = { showPremiumAddDialog = false }) {
+                TextButton(onClick = {
+                    showPremiumAddDialog = false
+                    initialPremiumIncomeByCal = ""
+                    initialPremiumNastaByCal = ""
+                    initialPremiumBhatByCal = ""
+                    initialPremiumGariByCal = ""
+                    initialPremiumOnnanoByCal = ""
+                }) {
                     Text("বাতিল", color = Color(0xFF94A3B8))
                 }
             }
@@ -6880,6 +7386,11 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
             confirmButton = {
                 TextButton(
                     onClick = {
+                        if (isViewerMode) {
+                            Toast.makeText(context, "Viewers Mode সক্রিয় রয়েছে! বাজেট বা লিমিট পরিবর্তন করা যাবে না।", Toast.LENGTH_SHORT).show()
+                            showPremiumTargetsEditDialog = false
+                            return@TextButton
+                        }
                         val incomeVal = editIncomeTarget.toDoubleOrNull() ?: 0.0
                         val expenseVal = editExpenseTarget.toDoubleOrNull() ?: 0.0
 
@@ -6917,7 +7428,10 @@ fun TakaHishabMainScreen(viewModel: MainViewModel) {
             confirmButton = {
                 Button(
                     onClick = {
-                        if (newFolderName.isNotBlank()) {
+                        if (isViewerMode) {
+                            Toast.makeText(context, "Viewers Mode সক্রিয় রয়েছে! নতুন ফোল্ডার তৈরি করা যাবে না।", Toast.LENGTH_SHORT).show()
+                            showAddFolderDialog = false
+                        } else if (newFolderName.isNotBlank()) {
                             viewModel.addFolder(newFolderName.trim())
                             Toast.makeText(context, "ফোল্ডার তৈরি হয়েছে!", Toast.LENGTH_SHORT).show()
                             showAddFolderDialog = false
@@ -7035,19 +7549,19 @@ fun ExpenseLineChart(filteredEntries: List<DailyEntry>) {
             drawPath(
                 path = connectionPath,
                 color = primaryColor,
-                style = Stroke(width = 3.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
+                style = Stroke(width = 1.8.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
             )
 
             // Draw circles & value text labels above points
             points.forEachIndexed { index, p ->
                 drawCircle(
                     color = primaryColor,
-                    radius = 4.dp.toPx(),
+                    radius = 3.dp.toPx(),
                     center = p
                 )
                 drawCircle(
                     color = Color.White,
-                    radius = 1.5.dp.toPx(),
+                    radius = 1.dp.toPx(),
                     center = p
                 )
             }
@@ -7989,18 +8503,18 @@ fun IncomeExpenseTrendChart(filteredEntries: List<DailyEntry>, wageRate: Double,
                                 .padding(horizontal = 4.dp)
                                 .background(Color(0xFF10B981).copy(alpha = 0.08f), RoundedCornerShape(12.dp))
                                 .border(BorderStroke(1.dp, Color(0xFF10B981).copy(alpha = 0.2f)), RoundedCornerShape(12.dp))
-                                .padding(vertical = 12.dp)
+                                .padding(vertical = 8.dp)
                         ) {
                             Icon(
                                 imageVector = Icons.Default.TrendingUp,
                                 contentDescription = null,
                                 tint = Color(0xFF10B981),
-                                modifier = Modifier.size(20.dp)
+                                modifier = Modifier.size(18.dp)
                             )
-                            Spacer(modifier = Modifier.height(4.dp))
+                            Spacer(modifier = Modifier.height(2.dp))
                             Text("মোট আয়", fontSize = 11.sp, color = Color(0xFF94A3B8), fontWeight = FontWeight.Bold)
                             Spacer(modifier = Modifier.height(2.dp))
-                            Text("৳ ${dayData.second.toInt().toString().toBanglaDigits()}", fontSize = 18.sp, fontWeight = FontWeight.Black, color = Color(0xFF10B981))
+                            Text("৳ ${dayData.second.toInt().toString().toBanglaDigits()}", fontSize = 16.sp, fontWeight = FontWeight.Black, color = Color(0xFF10B981))
                         }
                     }
                     
@@ -8011,45 +8525,45 @@ fun IncomeExpenseTrendChart(filteredEntries: List<DailyEntry>, wageRate: Double,
                             .padding(horizontal = 4.dp)
                             .background(Color(0xFFEF4444).copy(alpha = 0.08f), RoundedCornerShape(12.dp))
                             .border(BorderStroke(1.dp, Color(0xFFEF4444).copy(alpha = 0.2f)), RoundedCornerShape(12.dp))
-                            .padding(vertical = 12.dp)
+                            .padding(vertical = 8.dp)
                     ) {
                         Icon(
                             imageVector = Icons.Default.TrendingDown,
                             contentDescription = null,
                             tint = Color(0xFFEF4444),
-                            modifier = Modifier.size(20.dp)
+                            modifier = Modifier.size(18.dp)
                         )
-                        Spacer(modifier = Modifier.height(4.dp))
+                        Spacer(modifier = Modifier.height(2.dp))
                         Text("মোট ব্যয়", fontSize = 11.sp, color = Color(0xFF94A3B8), fontWeight = FontWeight.Bold)
                         Spacer(modifier = Modifier.height(2.dp))
-                        Text("৳ ${dayData.third.toInt().toString().toBanglaDigits()}", fontSize = 18.sp, fontWeight = FontWeight.Black, color = Color(0xFFEF4444))
+                        Text("৳ ${dayData.third.toInt().toString().toBanglaDigits()}", fontSize = 16.sp, fontWeight = FontWeight.Black, color = Color(0xFFEF4444))
                     }
                 }
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(6.dp))
             }
 
             // Centered Legend
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(top = 4.dp, bottom = 12.dp),
+                    .padding(top = 2.dp, bottom = 8.dp),
                 horizontalArrangement = Arrangement.Center,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 if (currentKhataMode != "ALT") {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.padding(end = 24.dp)
+                        modifier = Modifier.padding(end = 16.dp)
                     ) {
                         Box(
                             modifier = Modifier
-                                .size(width = 24.dp, height = 6.dp)
-                                .background(Color(0xFF10B981), RoundedCornerShape(3.dp))
+                                .size(width = 16.dp, height = 4.dp)
+                                .background(Color(0xFF10B981), RoundedCornerShape(2.dp))
                         )
-                        Spacer(modifier = Modifier.width(8.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
                         Text(
                             text = "আয়",
-                            fontSize = 13.sp,
+                            fontSize = 12.sp,
                             fontWeight = FontWeight.Bold,
                             color = Color.White
                         )
@@ -8060,31 +8574,31 @@ fun IncomeExpenseTrendChart(filteredEntries: List<DailyEntry>, wageRate: Double,
                 ) {
                     Box(
                         modifier = Modifier
-                            .size(width = 24.dp, height = 6.dp)
-                            .background(Color(0xFFEF4444), RoundedCornerShape(3.dp))
+                            .size(width = 16.dp, height = 4.dp)
+                            .background(Color(0xFFEF4444), RoundedCornerShape(2.dp))
                     )
-                    Spacer(modifier = Modifier.width(8.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
                     Text(
                         text = "ব্যয়",
-                        fontSize = 13.sp,
+                        fontSize = 12.sp,
                         fontWeight = FontWeight.Bold,
                         color = Color.White
                     )
                 }
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(8.dp))
 
             // Graph Row
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(180.dp)
+                    .height(130.dp)
             ) {
                 // Y-Axis Labels Column
                 Column(
                     modifier = Modifier
-                        .width(50.dp)
+                        .width(42.dp)
                         .fillMaxHeight(),
                     verticalArrangement = Arrangement.SpaceBetween,
                     horizontalAlignment = Alignment.End
@@ -8099,14 +8613,14 @@ fun IncomeExpenseTrendChart(filteredEntries: List<DailyEntry>, wageRate: Double,
                         }
                         Text(
                             text = formattedLabel,
-                            fontSize = 10.sp,
+                            fontSize = 9.sp,
                             color = Color(0xFF94A3B8).copy(alpha = 0.8f),
                             fontWeight = FontWeight.Bold
                         )
                     }
                 }
 
-                Spacer(modifier = Modifier.width(10.dp))
+                Spacer(modifier = Modifier.width(8.dp))
 
                 // Graph Layout with Badge Overlays
                 BoxWithConstraints(
@@ -8115,7 +8629,7 @@ fun IncomeExpenseTrendChart(filteredEntries: List<DailyEntry>, wageRate: Double,
                         .fillMaxHeight()
                 ) {
                     val containerWidth = maxWidth
-                    val containerHeight = 180.dp
+                    val containerHeight = 130.dp
 
                     var activePopupText by remember { mutableStateOf<String?>(null) }
                     LaunchedEffect(activePopupText) {
@@ -8165,13 +8679,13 @@ fun IncomeExpenseTrendChart(filteredEntries: List<DailyEntry>, wageRate: Double,
                             Offset(width * 0.85f, height * 0.22f)
                         )
                         stars.forEach { star ->
-                            drawCircle(Color(0xFF3B82F6).copy(alpha = 0.25f), radius = 5.dp.toPx(), center = star)
-                            drawCircle(Color.White, radius = 1.dp.toPx(), center = star)
+                            drawCircle(Color(0xFF3B82F6).copy(alpha = 0.18f), radius = 3.dp.toPx(), center = star)
+                            drawCircle(Color.White.copy(alpha = 0.7f), radius = 0.8.dp.toPx(), center = star)
                         }
 
                         // Draw beautiful axes: left vertical axis & bottom horizontal axis
-                        val axisColor = Color(0xFF1D4ED8).copy(alpha = 0.6f)
-                        val axisStrokeWidth = 1.5.dp.toPx()
+                        val axisColor = Color(0xFF1D4ED8).copy(alpha = 0.4f)
+                        val axisStrokeWidth = 1.dp.toPx()
                         drawLine(
                             color = axisColor,
                             start = Offset(0f, 0f),
@@ -8190,10 +8704,10 @@ fun IncomeExpenseTrendChart(filteredEntries: List<DailyEntry>, wageRate: Double,
                             val x = if (trendData.size > 1) index * stepX else width / 2f
                             val isToday = index == trendData.size - 1 && weekOffset == 0
                             drawLine(
-                                color = if (isToday) Color(0xFF3B82F6).copy(alpha = 0.2f) else Color(0xFF334155).copy(alpha = 0.1f),
+                                color = if (isToday) Color(0xFF3B82F6).copy(alpha = 0.15f) else Color(0xFF334155).copy(alpha = 0.08f),
                                 start = Offset(x, 0f),
                                 end = Offset(x, height),
-                                strokeWidth = if (isToday) 1.5.dp.toPx() else 1.dp.toPx()
+                                strokeWidth = if (isToday) 1.dp.toPx() else 0.75.dp.toPx()
                             )
                         }
 
@@ -8202,10 +8716,10 @@ fun IncomeExpenseTrendChart(filteredEntries: List<DailyEntry>, wageRate: Double,
                         for (i in 0..gridLines) {
                             val y = (height / gridLines) * i
                             drawLine(
-                                color = Color(0xFF334155).copy(alpha = 0.12f),
+                                color = Color(0xFF334155).copy(alpha = 0.08f),
                                 start = Offset(0f, y),
                                 end = Offset(width, y),
-                                strokeWidth = 1.dp.toPx()
+                                strokeWidth = 0.75.dp.toPx()
                             )
                         }
 
@@ -8231,7 +8745,7 @@ fun IncomeExpenseTrendChart(filteredEntries: List<DailyEntry>, wageRate: Double,
                             drawPath(
                                 path = incomeFillPath,
                                 brush = Brush.verticalGradient(
-                                    colors = listOf(Color(0xFF10B981).copy(alpha = 0.22f), Color(0xFF10B981).copy(alpha = 0.04f), Color.Transparent),
+                                    colors = listOf(Color(0xFF10B981).copy(alpha = 0.18f), Color(0xFF10B981).copy(alpha = 0.03f), Color.Transparent),
                                     startY = 0f,
                                     endY = height
                                 )
@@ -8259,13 +8773,13 @@ fun IncomeExpenseTrendChart(filteredEntries: List<DailyEntry>, wageRate: Double,
                         drawPath(
                             path = expenseFillPath,
                             brush = Brush.verticalGradient(
-                                colors = listOf(Color(0xFFEF4444).copy(alpha = 0.18f), Color(0xFFEF4444).copy(alpha = 0.03f), Color.Transparent),
+                                colors = listOf(Color(0xFFEF4444).copy(alpha = 0.15f), Color(0xFFEF4444).copy(alpha = 0.02f), Color.Transparent),
                                 startY = 0f,
                                 endY = height
                             )
                         )
 
-                        val strokeWidth = if (trendData.size == 30) 1.2.dp.toPx() else 1.8.dp.toPx()
+                        val strokeWidth = if (trendData.size == 30) 1.0.dp.toPx() else 1.5.dp.toPx()
 
                         // Draw Income Smooth Curve (Green) with dual glowing halos
                         if (currentKhataMode != "ALT") {
@@ -8286,14 +8800,14 @@ fun IncomeExpenseTrendChart(filteredEntries: List<DailyEntry>, wageRate: Double,
                             // Glow layer 1
                             drawPath(
                                 path = incomePath,
-                                color = Color(0xFF10B981).copy(alpha = 0.12f),
-                                style = Stroke(width = strokeWidth * 4f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                                color = Color(0xFF10B981).copy(alpha = 0.10f),
+                                style = Stroke(width = strokeWidth * 3.5f, cap = StrokeCap.Round, join = StrokeJoin.Round)
                             )
                             // Glow layer 2
                             drawPath(
                                 path = incomePath,
-                                color = Color(0xFF10B981).copy(alpha = 0.24f),
-                                style = Stroke(width = strokeWidth * 2f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                                color = Color(0xFF10B981).copy(alpha = 0.20f),
+                                style = Stroke(width = strokeWidth * 1.8f, cap = StrokeCap.Round, join = StrokeJoin.Round)
                             )
                             // Sharp path
                             drawPath(
@@ -8321,14 +8835,14 @@ fun IncomeExpenseTrendChart(filteredEntries: List<DailyEntry>, wageRate: Double,
                         // Glow layer 1
                         drawPath(
                             path = expensePath,
-                            color = Color(0xFFEF4444).copy(alpha = 0.12f),
-                            style = Stroke(width = strokeWidth * 4f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                            color = Color(0xFFEF4444).copy(alpha = 0.10f),
+                            style = Stroke(width = strokeWidth * 3.5f, cap = StrokeCap.Round, join = StrokeJoin.Round)
                         )
                         // Glow layer 2
                         drawPath(
                             path = expensePath,
-                            color = Color(0xFFEF4444).copy(alpha = 0.24f),
-                            style = Stroke(width = strokeWidth * 2f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                            color = Color(0xFFEF4444).copy(alpha = 0.20f),
+                            style = Stroke(width = strokeWidth * 1.8f, cap = StrokeCap.Round, join = StrokeJoin.Round)
                         )
                         // Sharp path
                         drawPath(
@@ -8341,8 +8855,8 @@ fun IncomeExpenseTrendChart(filteredEntries: List<DailyEntry>, wageRate: Double,
                         if (currentKhataMode != "ALT") {
                             incomePoints.forEachIndexed { idx, p ->
                                 val isToday = idx == incomePoints.size - 1 && weekOffset == 0
-                                val dotRadius = if (trendData.size == 30) 2.dp else if (isToday) 6.dp else 4.dp
-                                val innerRadius = if (trendData.size == 30) 1.dp else if (isToday) 3.5.dp else 2.5.dp
+                                val dotRadius = if (trendData.size == 30) 1.5.dp else if (isToday) 4.5.dp else 3.dp
+                                val innerRadius = if (trendData.size == 30) 0.8.dp else if (isToday) 2.5.dp else 1.8.dp
                                 drawCircle(
                                     color = Color(0xFF10B981).copy(alpha = 0.22f),
                                     radius = dotRadius.toPx(),
@@ -8358,8 +8872,8 @@ fun IncomeExpenseTrendChart(filteredEntries: List<DailyEntry>, wageRate: Double,
 
                         expensePoints.forEachIndexed { idx, p ->
                             val isToday = idx == expensePoints.size - 1 && weekOffset == 0
-                            val dotRadius = if (trendData.size == 30) 2.dp else if (isToday) 6.dp else 4.dp
-                            val innerRadius = if (trendData.size == 30) 1.dp else if (isToday) 3.5.dp else 2.5.dp
+                            val dotRadius = if (trendData.size == 30) 1.5.dp else if (isToday) 4.5.dp else 3.dp
+                            val innerRadius = if (trendData.size == 30) 0.8.dp else if (isToday) 2.5.dp else 1.8.dp
                             drawCircle(
                                 color = Color(0xFFEF4444).copy(alpha = 0.22f),
                                 radius = dotRadius.toPx(),
@@ -8388,12 +8902,12 @@ fun IncomeExpenseTrendChart(filteredEntries: List<DailyEntry>, wageRate: Double,
                         if (currentKhataMode != "ALT" && maxIncomeVal > 0.0 && maxIncomeIndex >= 0) {
                             val xDp = stepXDp * maxIncomeIndex
                             val yPercent = (maxIncomeVal / maxVal).toFloat().coerceIn(0f, 1f)
-                            val yDp = 180.dp - (180 * yPercent).dp
+                            val yDp = 130.dp - (130 * yPercent).dp
 
                             Box(
                                 modifier = Modifier
-                                    .offset(x = xDp - 12.dp, y = yDp - 26.dp)
-                                    .size(24.dp)
+                                    .offset(x = xDp - 10.dp, y = yDp - 22.dp)
+                                    .size(20.dp)
                                     .alpha(badgeAlpha)
                                     .background(Color(0xFF10B981).copy(alpha = 0.2f), CircleShape)
                                     .border(BorderStroke(1.dp, Color(0xFF10B981)), CircleShape)
@@ -8408,7 +8922,7 @@ fun IncomeExpenseTrendChart(filteredEntries: List<DailyEntry>, wageRate: Double,
                                     imageVector = Icons.Default.Paid,
                                     contentDescription = null,
                                     tint = Color(0xFF10B981),
-                                    modifier = Modifier.size(14.dp)
+                                    modifier = Modifier.size(12.dp)
                                 )
                             }
                         }
@@ -8420,12 +8934,12 @@ fun IncomeExpenseTrendChart(filteredEntries: List<DailyEntry>, wageRate: Double,
                                 val otherVal = trendData[otherIncomeIndex].second
                                 val xDp = stepXDp * otherIncomeIndex
                                 val yPercent = (otherVal / maxVal).toFloat().coerceIn(0f, 1f)
-                                val yDp = 180.dp - (180 * yPercent).dp
+                                val yDp = 130.dp - (130 * yPercent).dp
 
                                 Box(
                                     modifier = Modifier
-                                        .offset(x = xDp - 12.dp, y = yDp - 26.dp)
-                                        .size(24.dp)
+                                        .offset(x = xDp - 10.dp, y = yDp - 22.dp)
+                                        .size(20.dp)
                                         .alpha(badgeAlpha)
                                         .background(Color(0xFF10B981).copy(alpha = 0.2f), CircleShape)
                                         .border(BorderStroke(1.dp, Color(0xFF10B981)), CircleShape)
@@ -8440,7 +8954,7 @@ fun IncomeExpenseTrendChart(filteredEntries: List<DailyEntry>, wageRate: Double,
                                         imageVector = Icons.Default.Paid,
                                         contentDescription = null,
                                         tint = Color(0xFF10B981),
-                                        modifier = Modifier.size(14.dp)
+                                        modifier = Modifier.size(12.dp)
                                     )
                                 }
                             }
@@ -8450,12 +8964,12 @@ fun IncomeExpenseTrendChart(filteredEntries: List<DailyEntry>, wageRate: Double,
                         if (maxExpenseVal > 0.0 && maxExpenseIndex >= 0) {
                             val xDp = stepXDp * maxExpenseIndex
                             val yPercent = (maxExpenseVal / maxVal).toFloat().coerceIn(0f, 1f)
-                            val yDp = 180.dp - (180 * yPercent).dp
+                            val yDp = 130.dp - (130 * yPercent).dp
 
                             Box(
                                 modifier = Modifier
-                                    .offset(x = xDp - 12.dp, y = yDp - 26.dp)
-                                    .size(24.dp)
+                                    .offset(x = xDp - 10.dp, y = yDp - 22.dp)
+                                    .size(20.dp)
                                     .alpha(badgeAlpha)
                                     .background(Color(0xFFEF4444).copy(alpha = 0.2f), CircleShape)
                                     .border(BorderStroke(1.dp, Color(0xFFEF4444)), CircleShape)
@@ -8470,7 +8984,7 @@ fun IncomeExpenseTrendChart(filteredEntries: List<DailyEntry>, wageRate: Double,
                                     imageVector = Icons.Default.Paid,
                                     contentDescription = null,
                                     tint = Color(0xFFEF4444),
-                                    modifier = Modifier.size(14.dp)
+                                    modifier = Modifier.size(12.dp)
                                 )
                             }
                         }
@@ -8513,14 +9027,14 @@ fun IncomeExpenseTrendChart(filteredEntries: List<DailyEntry>, wageRate: Double,
                 }
             }
 
-            Spacer(modifier = Modifier.height(14.dp))
+            Spacer(modifier = Modifier.height(8.dp))
 
             // Bottom Day Labels (Horizontal timeline) perfectly aligned with the dots!
             Row(
                 modifier = Modifier.fillMaxWidth()
             ) {
                 // Left spacer offsets the labels perfectly to match the Canvas area
-                Spacer(modifier = Modifier.width(60.dp))
+                Spacer(modifier = Modifier.width(50.dp))
 
                 Row(
                     modifier = Modifier.weight(1f),
@@ -8811,7 +9325,8 @@ fun DashboardAvgPillItem(
 @Composable
 fun CloseAndPaidStamp(
     modifier: Modifier = Modifier,
-    monthText: String = ""
+    monthText: String = "",
+    stampColor: Color = Color(0xFFDC2626) // Authentic Rubber Stamp Crimson Red
 ) {
     val displayMonth = remember(monthText) {
         val clean = monthText.removePrefix("★ ").removePrefix("✦ ").trim()
@@ -8825,66 +9340,152 @@ fun CloseAndPaidStamp(
 
     Box(
         modifier = modifier
-            .rotate(-10f)
-            .size(72.dp)
-            .drawBehind {
-                val strokeWidth = 1.6.dp.toPx()
-                val radius = size.minDimension / 2f - strokeWidth
-                // Outer circle
-                drawCircle(
-                    color = Color(0xFF60A5FA).copy(alpha = 0.85f),
-                    radius = radius,
-                    style = androidx.compose.ui.graphics.drawscope.Stroke(
-                        width = strokeWidth
-                    )
-                )
-                // Inner circle
-                drawCircle(
-                    color = Color(0xFF60A5FA).copy(alpha = 0.55f),
-                    radius = radius - 3.5.dp.toPx(),
-                    style = androidx.compose.ui.graphics.drawscope.Stroke(
-                        width = 1.dp.toPx()
-                    )
-                )
-            },
+            .rotate(-14f)
+            .size(82.dp),
         contentAlignment = Alignment.Center
     ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center,
-            modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val cx = size.width / 2f
+            val cy = size.height / 2f
+            val maxR = size.minDimension / 2f - 2.dp.toPx()
+
+            // 1. Draw outer scalloped / serrated rosette edge (24 teeth)
+            val teethCount = 24
+            val outerR = maxR
+            val innerR = maxR * 0.88f
+            val scallopPath = Path()
+
+            for (i in 0 until teethCount) {
+                val angleStart = (i * 2 * Math.PI / teethCount).toFloat()
+                val angleMid = ((i * 2 + 1) * Math.PI / teethCount).toFloat()
+                val angleEnd = ((i + 1) * 2 * Math.PI / teethCount).toFloat()
+
+                val xOuter = cx + outerR * kotlin.math.cos(angleStart)
+                val yOuter = cy + outerR * kotlin.math.sin(angleStart)
+                val xInner = cx + innerR * kotlin.math.cos(angleMid)
+                val yInner = cy + innerR * kotlin.math.sin(angleMid)
+
+                if (i == 0) {
+                    scallopPath.moveTo(xOuter, yOuter)
+                }
+                scallopPath.quadraticBezierTo(
+                    cx + (outerR * 1.02f) * kotlin.math.cos((angleStart + angleMid) / 2f),
+                    cy + (outerR * 1.02f) * kotlin.math.sin((angleStart + angleMid) / 2f),
+                    xInner,
+                    yInner
+                )
+                scallopPath.quadraticBezierTo(
+                    cx + (outerR * 1.02f) * kotlin.math.cos((angleMid + angleEnd) / 2f),
+                    cy + (outerR * 1.02f) * kotlin.math.sin((angleMid + angleEnd) / 2f),
+                    cx + outerR * kotlin.math.cos(angleEnd),
+                    cy + outerR * kotlin.math.sin(angleEnd)
+                )
+            }
+            scallopPath.close()
+
+            // Draw solid outer red scalloped rosette
+            drawPath(
+                path = scallopPath,
+                color = stampColor
+            )
+
+            // Inner white circular cutout
+            val whiteCircleR = maxR * 0.84f
+            drawCircle(
+                color = Color.White,
+                radius = whiteCircleR,
+                center = Offset(cx, cy)
+            )
+
+            // Outer red ring
+            val outerRingR = maxR * 0.81f
+            drawCircle(
+                color = stampColor,
+                radius = outerRingR,
+                center = Offset(cx, cy),
+                style = Stroke(width = 2.dp.toPx())
+            )
+
+            // Inner red ring
+            val innerRingR = maxR * 0.73f
+            drawCircle(
+                color = stampColor,
+                radius = innerRingR,
+                center = Offset(cx, cy),
+                style = Stroke(width = 1.2.dp.toPx())
+            )
+
+            // Helper to draw a 5-pointed star
+            fun drawStar(centerX: Float, centerY: Float, radius: Float) {
+                val starPath = Path()
+                val innerStarR = radius * 0.42f
+                for (step in 0 until 10) {
+                    val r = if (step % 2 == 0) radius else innerStarR
+                    val angle = (step * Math.PI / 5.0 - Math.PI / 2.0).toFloat()
+                    val x = centerX + r * kotlin.math.cos(angle)
+                    val y = centerY + r * kotlin.math.sin(angle)
+                    if (step == 0) starPath.moveTo(x, y) else starPath.lineTo(x, y)
+                }
+                starPath.close()
+                drawPath(starPath, color = stampColor)
+            }
+
+            // Top 3 Stars (arranged in an upward arc)
+            val topStarOffset = maxR * 0.45f
+            drawStar(cx, cy - topStarOffset - 1.dp.toPx(), 4.2.dp.toPx()) // Center top star (larger)
+            drawStar(cx - maxR * 0.30f, cy - topStarOffset + 2.5.dp.toPx(), 3.0.dp.toPx()) // Left top star
+            drawStar(cx + maxR * 0.30f, cy - topStarOffset + 2.5.dp.toPx(), 3.0.dp.toPx()) // Right top star
+
+            // Bottom 3 Stars (arranged in a downward arc)
+            val bottomStarOffset = maxR * 0.45f
+            drawStar(cx, cy + bottomStarOffset + 1.dp.toPx(), 4.2.dp.toPx()) // Center bottom star (larger)
+            drawStar(cx - maxR * 0.30f, cy + bottomStarOffset - 2.5.dp.toPx(), 3.0.dp.toPx()) // Left bottom star
+            drawStar(cx + maxR * 0.30f, cy + bottomStarOffset - 2.5.dp.toPx(), 3.0.dp.toPx()) // Right bottom star
+        }
+
+        // Center Slanted Banner with "PAID & CLOSE"
+        Box(
+            modifier = Modifier
+                .rotate(-14f)
+                .fillMaxWidth(0.96f)
+                .height(24.dp)
+                .background(
+                    color = stampColor,
+                    shape = RoundedCornerShape(4.dp)
+                )
+                .border(
+                    width = 1.2.dp,
+                    color = Color.White,
+                    shape = RoundedCornerShape(4.dp)
+                )
+                .padding(horizontal = 2.dp),
+            contentAlignment = Alignment.Center
         ) {
-            Text(
-                text = "CLOSE AND PAID",
-                fontSize = 6.2.sp,
-                fontWeight = FontWeight.Black,
-                color = Color(0xFF93C5FD),
-                letterSpacing = 0.5.sp,
-                textAlign = TextAlign.Center,
-                lineHeight = 7.sp
-            )
-
-            Spacer(modifier = Modifier.height(1.dp))
-
-            Icon(
-                imageVector = Icons.Default.Check,
-                contentDescription = "Close and Paid Seal",
-                tint = Color(0xFF93C5FD),
-                modifier = Modifier.size(20.dp)
-            )
-
-            Spacer(modifier = Modifier.height(1.dp))
-
-            Text(
-                text = displayMonth,
-                fontSize = 5.8.sp,
-                fontWeight = FontWeight.ExtraBold,
-                color = Color(0xFF93C5FD).copy(alpha = 0.95f),
-                letterSpacing = 0.4.sp,
-                textAlign = TextAlign.Center,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Text(
+                    text = "PAID & CLOSE",
+                    fontSize = 8.5.sp,
+                    fontWeight = FontWeight.Black,
+                    color = Color.White,
+                    letterSpacing = 0.6.sp,
+                    maxLines = 1,
+                    textAlign = TextAlign.Center
+                )
+                if (displayMonth.isNotBlank() && displayMonth != "সব ফোল্ডার") {
+                    Text(
+                        text = displayMonth,
+                        fontSize = 4.8.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White.copy(alpha = 0.92f),
+                        letterSpacing = 0.3.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
         }
     }
 }
@@ -8920,7 +9521,7 @@ fun DynamicFolderHeaderDropdown(
             onClick = { isExpanded = !isExpanded },
             shape = RoundedCornerShape(12.dp),
             color = containerColor,
-            border = BorderStroke(1.dp, if (isCurrentClosed) Color(0xFF10B981).copy(alpha = 0.6f) else borderColor)
+            border = BorderStroke(1.dp, if (isCurrentClosed) Color(0xFFDC2626).copy(alpha = 0.7f) else borderColor)
         ) {
             Row(
                 modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
@@ -8930,16 +9531,16 @@ fun DynamicFolderHeaderDropdown(
                 Box(
                     modifier = Modifier
                         .size(26.dp)
-                        .background(if (isCurrentClosed) Color(0xFF10B981).copy(alpha = 0.25f) else accentColor.copy(alpha = 0.25f), CircleShape),
+                        .background(if (isCurrentClosed) Color(0xFFDC2626).copy(alpha = 0.25f) else accentColor.copy(alpha = 0.25f), CircleShape),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
-                        imageVector = if (isCurrentClosed) Icons.Default.Verified
+                        imageVector = if (isCurrentClosed) Icons.Default.WorkspacePremium
                                       else if (selectedFolder == "সব ফোল্ডার") Icons.Default.FolderSpecial
                                       else Icons.Default.Folder,
                         contentDescription = null,
-                        tint = if (isCurrentClosed) Color(0xFF34D399) else accentColor,
-                        modifier = Modifier.size(15.dp)
+                        tint = if (isCurrentClosed) Color(0xFFEF4444) else accentColor,
+                        modifier = Modifier.size(16.dp)
                     )
                 }
                 Column {
@@ -8953,17 +9554,17 @@ fun DynamicFolderHeaderDropdown(
                     )
                     if (isCurrentClosed) {
                         Text(
-                            text = "🔒 CLOSE & PAID",
+                            text = "🔒 PAID & CLOSE",
                             fontSize = 8.5.sp,
                             fontWeight = FontWeight.ExtraBold,
-                            color = Color(0xFF34D399)
+                            color = Color(0xFFEF4444)
                         )
                     }
                 }
                 Icon(
                     imageVector = if (isExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
                     contentDescription = "ফোল্ডার নির্বাচন ড্রপডাউন",
-                    tint = if (isCurrentClosed) Color(0xFF34D399) else accentColor.copy(alpha = 0.9f),
+                    tint = if (isCurrentClosed) Color(0xFFEF4444) else accentColor.copy(alpha = 0.9f),
                     modifier = Modifier.size(18.dp)
                 )
             }
@@ -8973,7 +9574,7 @@ fun DynamicFolderHeaderDropdown(
             expanded = isExpanded,
             onDismissRequest = { isExpanded = false },
             modifier = Modifier
-                .widthIn(min = 270.dp, max = 350.dp)
+                .widthIn(min = 320.dp, max = 390.dp)
                 .background(Color(0xFF0F172A), RoundedCornerShape(16.dp))
                 .border(1.dp, accentColor.copy(alpha = 0.4f), RoundedCornerShape(16.dp))
         ) {
@@ -9115,24 +9716,24 @@ fun DynamicFolderHeaderDropdown(
                                 )
                                 if (isClosed) {
                                     Surface(
-                                        color = Color(0xFF10B981).copy(alpha = 0.2f),
+                                        color = Color(0xFFDC2626).copy(alpha = 0.2f),
                                         shape = RoundedCornerShape(4.dp),
-                                        border = BorderStroke(1.dp, Color(0xFF10B981).copy(alpha = 0.4f))
+                                        border = BorderStroke(1.dp, Color(0xFFDC2626).copy(alpha = 0.5f))
                                     ) {
                                         Text(
                                             text = "পেইড",
                                             fontSize = 8.5.sp,
                                             fontWeight = FontWeight.Bold,
-                                            color = Color(0xFF34D399),
+                                            color = Color(0xFFEF4444),
                                             modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
                                         )
                                     }
                                 }
                             }
                             Text(
-                                text = "${folderCount.toBangla()} টি হিসাব" + if (isClosed) " (লকড)" else "",
+                                text = "${folderCount.toBangla()} টি হিসাব" + if (isClosed) " (সিলমোহরকৃত)" else "",
                                 fontSize = 10.5.sp,
-                                color = if (isClosed) Color(0xFF34D399) else if (isSelected) accentColor else Color(0xFF64748B)
+                                color = if (isClosed) Color(0xFFEF4444) else if (isSelected) accentColor else Color(0xFF64748B)
                             )
                         }
                     },
@@ -9141,7 +9742,7 @@ fun DynamicFolderHeaderDropdown(
                             modifier = Modifier
                                 .size(28.dp)
                                 .background(
-                                    if (isClosed) Color(0xFF10B981).copy(alpha = 0.25f)
+                                    if (isClosed) Color(0xFFDC2626).copy(alpha = 0.25f)
                                     else if (isSelected) accentColor.copy(alpha = 0.25f)
                                     else Color.White.copy(alpha = 0.08f),
                                     CircleShape
@@ -9149,9 +9750,9 @@ fun DynamicFolderHeaderDropdown(
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(
-                                imageVector = if (isClosed) Icons.Default.Verified else Icons.Default.Folder,
+                                imageVector = if (isClosed) Icons.Default.WorkspacePremium else Icons.Default.Folder,
                                 contentDescription = null,
-                                tint = if (isClosed) Color(0xFF34D399) else if (isSelected) accentColor else Color(0xFF94A3B8),
+                                tint = if (isClosed) Color(0xFFEF4444) else if (isSelected) accentColor else Color(0xFF94A3B8),
                                 modifier = Modifier.size(16.dp)
                             )
                         }
@@ -9159,34 +9760,29 @@ fun DynamicFolderHeaderDropdown(
                     trailingIcon = {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            horizontalArrangement = Arrangement.spacedBy(2.dp)
                         ) {
                             if (isSelected) {
                                 Icon(
                                     imageVector = Icons.Default.CheckCircle,
                                     contentDescription = "নির্বাচিত",
                                     tint = accentColor,
-                                    modifier = Modifier.size(18.dp)
+                                    modifier = Modifier.size(17.dp)
                                 )
                             }
 
-                            // Close & Paid Button Toggle
+                            // Close & Paid Seal Toggle Button (No background)
                             IconButton(
                                 onClick = {
                                     onToggleCloseAndPaid(folder)
                                 },
-                                modifier = Modifier
-                                    .size(28.dp)
-                                    .background(
-                                        if (isClosed) Color(0xFF10B981).copy(alpha = 0.25f) else Color.White.copy(alpha = 0.08f),
-                                        CircleShape
-                                    )
+                                modifier = Modifier.size(30.dp)
                             ) {
                                 Icon(
-                                    imageVector = if (isClosed) Icons.Default.Verified else Icons.Default.LockOpen,
-                                    contentDescription = if (isClosed) "Close and Paid বন্ধ করুন" else "Close and Paid করুন",
-                                    tint = if (isClosed) Color(0xFF34D399) else Color(0xFF94A3B8),
-                                    modifier = Modifier.size(15.dp)
+                                    imageVector = if (isClosed) Icons.Default.WorkspacePremium else Icons.Outlined.WorkspacePremium,
+                                    contentDescription = if (isClosed) "Close and Paid সিলমোহর বন্ধ করুন" else "Close and Paid সিলমোহর দিন",
+                                    tint = if (isClosed) Color(0xFFDC2626) else Color(0xFF94A3B8),
+                                    modifier = Modifier.size(19.dp)
                                 )
                             }
 
@@ -9196,15 +9792,13 @@ fun DynamicFolderHeaderDropdown(
                                         isExpanded = false
                                         onDeleteFolder(folder)
                                     },
-                                    modifier = Modifier
-                                        .size(28.dp)
-                                        .background(Color(0xFFEF4444).copy(alpha = 0.15f), CircleShape)
+                                    modifier = Modifier.size(30.dp)
                                 ) {
                                     Icon(
                                         imageVector = Icons.Default.DeleteOutline,
                                         contentDescription = "ডিলিট করুন",
                                         tint = Color(0xFFF87171),
-                                        modifier = Modifier.size(15.dp)
+                                        modifier = Modifier.size(18.dp)
                                     )
                                 }
                             }
@@ -10429,7 +11023,8 @@ fun formatTimeAgoBn(timestamp: Long): String {
 @Composable
 fun Royal3DCalculatorDialog(
     onDismiss: () -> Unit,
-    onTransferToEntry: (value: String, type: String) -> Unit
+    onTransferToEntry: (value: String, type: String) -> Unit,
+    currentKhataMode: String = "GENERAL"
 ) {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE) }
@@ -11028,6 +11623,7 @@ fun Royal3DCalculatorDialog(
             containerColor = if (isCalcDarkMode) Color(0xFF1E293B) else Color.White,
             titleContentColor = if (isCalcDarkMode) Color.White else Color(0xFF0F172A),
             textContentColor = if (isCalcDarkMode) Color.White else Color(0xFF0F172A),
+            shape = RoundedCornerShape(24.dp),
             title = {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -11038,7 +11634,7 @@ fun Royal3DCalculatorDialog(
                 }
             },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
                         text = "ফলাফল: ৳ ${resultText.toBanglaDigits()}",
                         fontSize = 20.sp,
@@ -11046,7 +11642,10 @@ fun Royal3DCalculatorDialog(
                         color = Color(0xFFEA580C)
                     )
                     Text(
-                        text = "এই মানটি আপনার নোটবুকে কি হিসেবে এন্ট্রি করতে চান?",
+                        text = if (currentKhataMode == "PREMIUM")
+                            "এই ফলাফলটি দৈনিক খরচের খাতায় কোন ঘরে এন্ট্রি করতে চান?"
+                        else
+                            "এই মানটি আপনার নোটবুকে কি হিসেবে এন্ট্রি করতে চান?",
                         fontSize = 12.sp,
                         color = historyTextColor
                     )
@@ -11055,31 +11654,89 @@ fun Royal3DCalculatorDialog(
             confirmButton = {
                 Column(
                     modifier = Modifier.fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Button(
-                        onClick = {
-                            onTransferToEntry(resultText, "EXPENSE")
-                            showTransferPopup = false
-                        },
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFEF4444)),
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text("দৈনিক খরচ (টাকা) হিসেবে যোগ করুন", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 13.sp)
-                    }
-                    Button(
-                        onClick = {
-                            val doubleVal = resultText.toDoubleOrNull() ?: 0.0
-                            val intQty = doubleVal.toInt().toString()
-                            onTransferToEntry(intQty, "QTY")
-                            showTransferPopup = false
-                        },
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF3B82F6)),
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text("মালের পরিমাণ (পিস) হিসেবে যোগ করুন", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 13.sp)
+                    if (currentKhataMode == "PREMIUM") {
+                        Button(
+                            onClick = {
+                                onTransferToEntry(resultText, "PREMIUM_ONNANO")
+                                showTransferPopup = false
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFEF4444)),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("দৈনিক খরচ (অন্যান্য খরচ) হিসেবে যোগ করুন", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 12.5.sp)
+                        }
+                        Button(
+                            onClick = {
+                                onTransferToEntry(resultText, "PREMIUM_NASTA")
+                                showTransferPopup = false
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFF59E0B)),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("নাস্তা খরচ হিসেবে যোগ করুন", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 12.5.sp)
+                        }
+                        Button(
+                            onClick = {
+                                onTransferToEntry(resultText, "PREMIUM_BHAT")
+                                showTransferPopup = false
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981)),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("ভাত খরচ হিসেবে যোগ করুন", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 12.5.sp)
+                        }
+                        Button(
+                            onClick = {
+                                onTransferToEntry(resultText, "PREMIUM_GARI")
+                                showTransferPopup = false
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF6366F1)),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("গাড়ি ভাড়া হিসেবে যোগ করুন", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 12.5.sp)
+                        }
+                        Button(
+                            onClick = {
+                                onTransferToEntry(resultText, "PREMIUM_INCOME")
+                                showTransferPopup = false
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF3B82F6)),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("আয় (টাকা) হিসেবে যোগ করুন", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 12.5.sp)
+                        }
+                    } else {
+                        Button(
+                            onClick = {
+                                val doubleVal = resultText.toDoubleOrNull() ?: 0.0
+                                val intQty = doubleVal.toInt().toString()
+                                onTransferToEntry(intQty, "QTY")
+                                showTransferPopup = false
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF3B82F6)),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("মালের পরিমাণ (পিস) হিসেবে যোগ করুন", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 13.sp)
+                        }
+                        Button(
+                            onClick = {
+                                onTransferToEntry(resultText, "EXPENSE")
+                                showTransferPopup = false
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFEF4444)),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("মোট খরচ (টাকা) হিসেবে যোগ করুন", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 13.sp)
+                        }
                     }
                     TextButton(
                         onClick = { showTransferPopup = false },
@@ -14704,12 +15361,19 @@ fun ProfileTabScreen(
     val currentAvatarIdx by viewModel.profileAvatarIndex.collectAsStateWithLifecycle()
     val profileCustomAvatarUri by viewModel.profileCustomAvatarUri.collectAsStateWithLifecycle()
     val firebaseDbUrl by viewModel.firebaseDbUrl.collectAsStateWithLifecycle()
+    val isViewerMode by viewModel.isViewerMode.collectAsStateWithLifecycle()
 
     var showAvatarDialog by remember { mutableStateOf(false) }
     var showUrlEditDialog by remember { mutableStateOf(false) }
     var showNameEditDialog by remember { mutableStateOf(false) }
     var tempNameInput by remember { mutableStateOf("") }
     var isManualSyncing by remember { mutableStateOf(false) }
+
+    // Viewers Mode Password Dialog state
+    var showViewerPasswordDialog by remember { mutableStateOf(false) }
+    var viewerPasswordInput by remember { mutableStateOf("") }
+    var isViewerPasswordVisible by remember { mutableStateOf(false) }
+    var viewerPasswordError by remember { mutableStateOf("") }
 
     // Cloud login / register state
     var emailInput by remember { mutableStateOf("") }
@@ -14816,7 +15480,13 @@ fun ProfileTabScreen(
                     Box(
                         modifier = Modifier
                             .size(64.dp)
-                            .clickable { showAvatarDialog = true },
+                            .clickable {
+                                if (isViewerMode) {
+                                    Toast.makeText(context, "Viewers Mode সক্রিয় রয়েছে! প্রোফাইল ছবি পরিবর্তন করা যাবে না।", Toast.LENGTH_SHORT).show()
+                                } else {
+                                    showAvatarDialog = true
+                                }
+                            },
                         contentAlignment = Alignment.Center
                     ) {
                         UserProfileAvatar(
@@ -14850,8 +15520,12 @@ fun ProfileTabScreen(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(6.dp),
                             modifier = Modifier.clickable {
-                                tempNameInput = profileName
-                                showNameEditDialog = true
+                                if (isViewerMode) {
+                                    Toast.makeText(context, "Viewers Mode সক্রিয় রয়েছে! প্রোফাইল নাম পরিবর্তন করা যাবে না।", Toast.LENGTH_SHORT).show()
+                                } else {
+                                    tempNameInput = profileName
+                                    showNameEditDialog = true
+                                }
                             }
                         ) {
                             Text(
@@ -14875,24 +15549,72 @@ fun ProfileTabScreen(
                         )
                     }
 
-                    // URL button beautifully styled
-                    OutlinedButton(
-                        onClick = { showUrlEditDialog = true },
-                        colors = ButtonDefaults.outlinedButtonColors(
-                            contentColor = Color(0xFF3B82F6),
-                            containerColor = Color(0xFF131C33)
-                        ),
-                        border = BorderStroke(1.dp, Color(0xFF3B82F6).copy(alpha = 0.5f)),
-                        shape = RoundedCornerShape(10.dp),
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                        modifier = Modifier.height(32.dp)
+                    // Right action buttons column: Viewers Mode button above, URL button below
+                    Column(
+                        horizontalAlignment = Alignment.End,
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Text(
-                            text = "URL",
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color(0xFF3B82F6)
-                        )
+                        // Viewers Mode button
+                        OutlinedButton(
+                            onClick = {
+                                viewerPasswordInput = ""
+                                viewerPasswordError = ""
+                                isViewerPasswordVisible = false
+                                showViewerPasswordDialog = true
+                            },
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                contentColor = if (isViewerMode) Color(0xFF34D399) else Color(0xFFFBBF24),
+                                containerColor = if (isViewerMode) Color(0xFF064E3B).copy(alpha = 0.45f) else Color(0xFF78350F).copy(alpha = 0.3f)
+                            ),
+                            border = BorderStroke(1.dp, (if (isViewerMode) Color(0xFF10B981) else Color(0xFFF59E0B)).copy(alpha = 0.6f)),
+                            shape = RoundedCornerShape(10.dp),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                            modifier = Modifier.height(30.dp)
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Icon(
+                                    imageVector = if (isViewerMode) Icons.Default.Visibility else Icons.Default.VisibilityOff,
+                                    contentDescription = null,
+                                    tint = if (isViewerMode) Color(0xFF34D399) else Color(0xFFFBBF24),
+                                    modifier = Modifier.size(13.dp)
+                                )
+                                Text(
+                                    text = if (isViewerMode) "Viewers Mode (চালু)" else "Viewers Mode",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (isViewerMode) Color(0xFF34D399) else Color(0xFFFBBF24)
+                                )
+                            }
+                        }
+
+                        // URL button slightly below
+                        OutlinedButton(
+                            onClick = {
+                                if (isViewerMode) {
+                                    Toast.makeText(context, "Viewers Mode সক্রিয় রয়েছে! URL পরিবর্তন করা যাবে না।", Toast.LENGTH_SHORT).show()
+                                } else {
+                                    showUrlEditDialog = true
+                                }
+                            },
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                contentColor = Color(0xFF3B82F6),
+                                containerColor = Color(0xFF131C33)
+                            ),
+                            border = BorderStroke(1.dp, Color(0xFF3B82F6).copy(alpha = 0.5f)),
+                            shape = RoundedCornerShape(10.dp),
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 4.dp),
+                            modifier = Modifier.height(28.dp)
+                        ) {
+                            Text(
+                                text = "URL",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF3B82F6)
+                            )
+                        }
                     }
                 }
 
@@ -14974,6 +15696,10 @@ fun ProfileTabScreen(
 
                         Button(
                             onClick = {
+                                if (isViewerMode) {
+                                    Toast.makeText(context, "Viewers Mode সক্রিয় রয়েছে! অ্যাকাউন্ট পরিবর্তন বা লগইন করা যাবে না।", Toast.LENGTH_SHORT).show()
+                                    return@Button
+                                }
                                 if (emailInput.isBlank() || passwordInput.isBlank() || (isRegisterMode && nameInput.isBlank())) {
                                     Toast.makeText(context, "দয়া করে সবগুলো ঘর পূরণ করুন!", Toast.LENGTH_SHORT).show()
                                     return@Button
@@ -15041,6 +15767,10 @@ fun ProfileTabScreen(
                             // Manual Database Sync Button
                             Button(
                                 onClick = {
+                                    if (isViewerMode) {
+                                        Toast.makeText(context, "Viewers Mode সক্রিয় রয়েছে! সিঙ্ক করা যাবে না।", Toast.LENGTH_SHORT).show()
+                                        return@Button
+                                    }
                                     isManualSyncing = true
                                     viewModel.triggerCloudSyncForce { success, msg ->
                                         isManualSyncing = false
@@ -15074,8 +15804,12 @@ fun ProfileTabScreen(
                             // Logout Button
                             Button(
                                 onClick = {
-                                    viewModel.setGoogleSignIn("", "", false)
-                                    Toast.makeText(context, "ক্লাউড থেকে লগআউট সম্পন্ন হয়েছে!", Toast.LENGTH_SHORT).show()
+                                    if (isViewerMode) {
+                                        Toast.makeText(context, "Viewers Mode সক্রিয় রয়েছে! লগআউট করা যাবে না।", Toast.LENGTH_SHORT).show()
+                                    } else {
+                                        viewModel.setGoogleSignIn("", "", false)
+                                        Toast.makeText(context, "ক্লাউড থেকে লগআউট সম্পন্ন হয়েছে!", Toast.LENGTH_SHORT).show()
+                                    }
                                 },
                                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF7F1D1D).copy(alpha = 0.3f)),
                                 shape = RoundedCornerShape(10.dp),
@@ -15476,6 +16210,193 @@ fun ProfileTabScreen(
                             shape = RoundedCornerShape(10.dp)
                         ) {
                             Text("সংরক্ষণ করুন", fontWeight = FontWeight.Bold, color = Color.White)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // VIEWERS MODE PASSWORD DIALOG
+    if (showViewerPasswordDialog) {
+        Dialog(onDismissRequest = { 
+            showViewerPasswordDialog = false 
+            viewerPasswordError = ""
+        }) {
+            Card(
+                shape = RoundedCornerShape(20.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF0F172A)),
+                border = BorderStroke(1.5.dp, if (isViewerMode) Color(0xFF10B981) else Color(0xFFF59E0B)),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(12.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .padding(20.dp)
+                        .fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    // Header Row
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .background(
+                                        (if (isViewerMode) Color(0xFF10B981) else Color(0xFFF59E0B)).copy(alpha = 0.2f),
+                                        CircleShape
+                                    ),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = if (isViewerMode) Icons.Default.LockOpen else Icons.Default.Lock,
+                                    contentDescription = null,
+                                    tint = if (isViewerMode) Color(0xFF34D399) else Color(0xFFFBBF24),
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                            Column {
+                                Text(
+                                    text = if (isViewerMode) "Viewers Mode বন্ধ করুন" else "Viewers Mode চালু করুন",
+                                    color = Color.White,
+                                    fontSize = 16.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = "ক্লাউড লগইন / ব্যাকআপ পাসওয়ার্ড",
+                                    color = Color(0xFF94A3B8),
+                                    fontSize = 11.sp
+                                )
+                            }
+                        }
+                        IconButton(
+                            onClick = { 
+                                showViewerPasswordDialog = false 
+                                viewerPasswordError = ""
+                            },
+                            modifier = Modifier.size(28.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "বন্ধ করুন",
+                                tint = Color(0xFF94A3B8),
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
+
+                    Text(
+                        text = if (isViewerMode)
+                            "স্বাভাবিক মোডে ফিরে আসতে আপনার ক্লাউড বা ব্যাকআপ অ্যাকাউন্টের গোপন পাসওয়ার্ডটি লিখুন।"
+                        else
+                            "Viewers Mode সক্রিয় করতে ক্লাউড বা ব্যাকআপ অ্যাকাউন্টের গোপন পাসওয়ার্ডটি লিখুন। এই মোড চালু থাকলে হিসাব যুক্ত, এডিট বা ডিলিট করা যাবে না।",
+                        color = Color(0xFFCBD5E1),
+                        fontSize = 12.sp,
+                        lineHeight = 17.sp
+                    )
+
+                    OutlinedTextField(
+                        value = viewerPasswordInput,
+                        onValueChange = { 
+                            viewerPasswordInput = it
+                            if (viewerPasswordError.isNotEmpty()) viewerPasswordError = ""
+                        },
+                        label = { Text("গোপন পাসওয়ার্ড লিখুন", color = Color(0xFF94A3B8), fontSize = 12.sp) },
+                        placeholder = { Text("আপনার পাসওয়ার্ড...", color = Color(0xFF64748B), fontSize = 12.sp) },
+                        singleLine = true,
+                        visualTransformation = if (isViewerPasswordVisible) androidx.compose.ui.text.input.VisualTransformation.None else androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                        trailingIcon = {
+                            IconButton(onClick = { isViewerPasswordVisible = !isViewerPasswordVisible }) {
+                                Icon(
+                                    imageVector = if (isViewerPasswordVisible) Icons.Default.Visibility else Icons.Default.VisibilityOff,
+                                    contentDescription = "পাসওয়ার্ড প্রদর্শন পরিবর্তন করুন",
+                                    tint = Color(0xFF94A3B8)
+                                )
+                            }
+                        },
+                        isError = viewerPasswordError.isNotEmpty(),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White,
+                            focusedBorderColor = if (isViewerMode) Color(0xFF10B981) else Color(0xFFF59E0B),
+                            unfocusedBorderColor = Color.White.copy(alpha = 0.15f),
+                            focusedContainerColor = Color(0xFF131C33),
+                            unfocusedContainerColor = Color(0xFF131C33),
+                            errorBorderColor = Color(0xFFEF4444)
+                        ),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    if (viewerPasswordError.isNotEmpty()) {
+                        Text(
+                            text = viewerPasswordError,
+                            color = Color(0xFFEF4444),
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+
+                    // Action Buttons
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = { 
+                                showViewerPasswordDialog = false 
+                                viewerPasswordError = ""
+                            },
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
+                            border = BorderStroke(1.dp, Color.White.copy(alpha = 0.15f)),
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(10.dp)
+                        ) {
+                            Text("বাতিল", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                        }
+
+                        Button(
+                            onClick = {
+                                if (viewerPasswordInput.isBlank()) {
+                                    viewerPasswordError = "দয়া করে পাসওয়ার্ড লিখুন!"
+                                    return@Button
+                                }
+                                val isCorrect = viewModel.verifyPassword(viewerPasswordInput)
+                                if (isCorrect) {
+                                    val newMode = !isViewerMode
+                                    viewModel.setViewerMode(newMode)
+                                    showViewerPasswordDialog = false
+                                    viewerPasswordInput = ""
+                                    viewerPasswordError = ""
+                                    Toast.makeText(
+                                        context,
+                                        if (newMode) "Viewers Mode চালু করা হয়েছে! এখন শুধু হিসাব দেখা যাবে।" 
+                                        else "Viewers Mode বন্ধ করা হয়েছে! স্বাভাবিক মোড সক্রিয়।",
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                } else {
+                                    viewerPasswordError = "ভুল পাসওয়ার্ড! ক্লাউড লগইনের সঠিক পাসওয়ার্ড দিন।"
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (isViewerMode) Color(0xFF10B981) else Color(0xFFF59E0B)
+                            ),
+                            modifier = Modifier.weight(1.3f),
+                            shape = RoundedCornerShape(10.dp)
+                        ) {
+                            Text(
+                                text = if (isViewerMode) "মোড বন্ধ করুন" else "মোড চালু করুন",
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF0F172A),
+                                fontSize = 12.sp
+                            )
                         }
                     }
                 }
